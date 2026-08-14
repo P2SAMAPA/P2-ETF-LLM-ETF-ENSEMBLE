@@ -87,6 +87,7 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
         self.models = [
             "nemotron-3-nano:30b",   # NVIDIA Nemotron 30B - FREE
             "nemotron-3-nano:4b",    # NVIDIA Nemotron 4B - FREE (faster)
+            "gemma4:31b-cloud",
         ]
         self.available_models = []
         
