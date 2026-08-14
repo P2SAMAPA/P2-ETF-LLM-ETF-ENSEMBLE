@@ -71,9 +71,7 @@ Return ONLY the JSON, no other text. Use TODAY'S date ({datetime.now().strftime(
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
-                selections = data.get("selections", [])
-                if selections:
-                    return selections
+                return data.get("selections", [])
         except:
             pass
         
@@ -101,15 +99,21 @@ class OpenRouterAnalyzer(LLMAnalyzer):
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
+        # Confirmed working models on OpenRouter
         self.models = [
+            # OpenAI
             "openai/gpt-4o",
             "openai/gpt-4o-mini",
             "openai/gpt-4-turbo",
             "openai/gpt-3.5-turbo",
+            # Anthropic
             "anthropic/claude-3-haiku",
+            # Meta
             "meta-llama/llama-3.1-70b-instruct",
             "meta-llama/llama-3.1-8b-instruct",
+            # Mistral
             "mistralai/mistral-large-2407",
+            # Others
             "deepseek/deepseek-chat",
             "qwen/qwen-2.5-72b-instruct",
         ]
@@ -119,7 +123,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         """Analyze using ALL OpenRouter models in parallel."""
         prompt = self.build_prompt(universe_name, tickers)
         results = []
-        all_models_used = []
+        successful_models = []
         
         logger.info(f"  Querying {len(self.models)} OpenRouter models...")
         
@@ -138,11 +142,10 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     if response:
                         selections = self.parse_response(response)
                         if selections:
-                            # Add model name to each selection
                             for sel in selections:
                                 sel["model"] = model
                             results.extend(selections)
-                            all_models_used.append(model)
+                            successful_models.append(model)
                             logger.info(f"    ✅ {model}: {len(selections)} picks")
                         else:
                             logger.warning(f"    ⚠️ {model}: No valid selections")
@@ -154,8 +157,12 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 if completed % 5 == 0:
                     logger.info(f"    Progress: {completed}/{len(self.models)} models done")
         
-        logger.info(f"  ✅ {len(results)} total selections from {len(all_models_used)} models")
-        return self._aggregate_results(results, all_models_used)
+        logger.info(f"  ✅ {len(results)} total selections from {len(successful_models)} models")
+        
+        # Store successful models for tracking
+        self.last_successful_models = successful_models
+        
+        return self._aggregate_results(results)
     
     def _call_api_safe(self, model: str, prompt: str) -> Optional[str]:
         """Call OpenRouter API with retries."""
@@ -192,7 +199,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     
-    def _aggregate_results(self, results: List[Dict], all_models_used: List[str]) -> Dict:
+    def _aggregate_results(self, results: List[Dict]) -> Dict:
         """Aggregate results from ALL models."""
         if not results:
             return {"selections": [], "consensus": {}}
@@ -235,21 +242,175 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 conf_counts[c] = conf_counts.get(c, 0) + 1
             top_conf = max(conf_counts, key=conf_counts.get)
             
+            # Get unique models for this ticker
+            unique_models = list(set(data["models"]))
+            # Filter out 'unknown'
+            unique_models = [m for m in unique_models if m != 'unknown']
+            
             selections.append({
                 "ticker": ticker,
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
                 "votes": ticker_scores[ticker],
-                "models": list(set(data["models"]))  # Unique models that voted for this ticker
+                "models": unique_models  # Include models that voted for this ticker
             })
+        
+        # Get all models used (from successful models)
+        all_models = list(set([r.get("model", "unknown") for r in results if r.get("model") != "unknown"]))
         
         return {
             "selections": selections,
             "consensus": {
                 "total_votes": total_responses,
                 "ticker_scores": ticker_scores,
-                "models_used": list(set(all_models_used))  # All unique models used
+                "models_used": all_models
+            }
+        }
+
+
+class OllamaAnalyzer(LLMAnalyzer):
+    """Ollama (local) implementation."""
+    
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.base_url = config.get("OLLAMA_URL", "http://localhost:11434")
+        self.models = config.get("OLLAMA_MODELS", [
+            "llama3.2:3b",
+            "phi3:mini",
+            "mistral:7b",
+        ])
+        self._check_availability()
+    
+    def _check_availability(self):
+        """Check if Ollama is running."""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
+            if response.status_code == 200:
+                available_models = [m["name"] for m in response.json().get("models", [])]
+                self.models = [m for m in self.models if m in available_models]
+                if self.models:
+                    logger.info(f"✅ Ollama available with models: {self.models}")
+                else:
+                    logger.warning("⚠️ No Ollama models available")
+            else:
+                self.models = []
+        except:
+            self.models = []
+            logger.warning("⚠️ Ollama not available")
+    
+    def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
+        """Analyze using Ollama models."""
+        if not self.models:
+            return {"selections": [], "consensus": {}}
+        
+        prompt = self.build_prompt(universe_name, tickers)
+        results = []
+        successful_models = []
+        
+        logger.info(f"  Querying {len(self.models)} Ollama models...")
+        
+        for model in self.models:
+            try:
+                response = self._call_api(model, prompt)
+                if response:
+                    selections = self.parse_response(response)
+                    if selections:
+                        model_name = f"ollama/{model}"
+                        for sel in selections:
+                            sel["model"] = model_name
+                        results.extend(selections)
+                        successful_models.append(model_name)
+                        logger.info(f"    ✅ ollama/{model}: {len(selections)} picks")
+                    else:
+                        logger.warning(f"    ⚠️ ollama/{model}: No valid selections")
+                else:
+                    logger.warning(f"    ⚠️ ollama/{model}: Empty response")
+            except Exception as e:
+                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}...")
+        
+        logger.info(f"  ✅ {len(results)} total selections from {len(successful_models)} Ollama models")
+        
+        return self._aggregate_results(results)
+    
+    def _call_api(self, model: str, prompt: str) -> str:
+        """Call Ollama API."""
+        url = f"{self.base_url}/api/generate"
+        data = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.3,
+            "max_tokens": 600,
+        }
+        
+        response = requests.post(url, json=data, timeout=60)
+        response.raise_for_status()
+        return response.json()["response"]
+    
+    def _aggregate_results(self, results: List[Dict]) -> Dict:
+        """Aggregate results from Ollama models."""
+        if not results:
+            return {"selections": [], "consensus": {}}
+        
+        ticker_scores = {}
+        ticker_data = {}
+        total_responses = len(results)
+        
+        for r in results:
+            ticker = r.get("ticker", "").upper()
+            if ticker:
+                if ticker not in ticker_scores:
+                    ticker_scores[ticker] = 0
+                    ticker_data[ticker] = {
+                        "returns": [],
+                        "confidences": [],
+                        "rationales": [],
+                        "models": []
+                    }
+                ticker_scores[ticker] += 1
+                ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
+                ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
+                ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
+                ticker_data[ticker]["models"].append(r.get("model", "unknown"))
+        
+        sorted_tickers = sorted(
+            ticker_scores.items(),
+            key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
+            reverse=True
+        )
+        
+        top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
+        
+        selections = []
+        for ticker in top_tickers:
+            data = ticker_data[ticker]
+            avg_return = sum(data["returns"]) / len(data["returns"])
+            conf_counts = {}
+            for c in data["confidences"]:
+                conf_counts[c] = conf_counts.get(c, 0) + 1
+            top_conf = max(conf_counts, key=conf_counts.get)
+            
+            unique_models = list(set(data["models"]))
+            unique_models = [m for m in unique_models if m != 'unknown']
+            
+            selections.append({
+                "ticker": ticker,
+                "expected_return": round(avg_return, 2),
+                "confidence": top_conf,
+                "rationale": data["rationales"][0] if data["rationales"] else "",
+                "votes": ticker_scores[ticker],
+                "models": unique_models
+            })
+        
+        all_models = list(set([r.get("model", "unknown") for r in results if r.get("model") != "unknown"]))
+        
+        return {
+            "selections": selections,
+            "consensus": {
+                "total_votes": total_responses,
+                "ticker_scores": ticker_scores,
+                "models_used": all_models
             }
         }
 
@@ -257,4 +418,122 @@ class OpenRouterAnalyzer(LLMAnalyzer):
 class EnsembleAnalyzer:
     """Combine all LLM analyzers into one ensemble."""
     
-    def __init
+    def __init__(self, config: Dict):
+        self.config = config
+        self.analyzers = []
+        
+        # OpenRouter (with API key)
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if openrouter_key:
+            self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
+            logger.info("✅ OpenRouter analyzer initialized")
+        else:
+            logger.warning("⚠️ OPENROUTER_API_KEY not set")
+        
+        # Ollama (local)
+        ollama = OllamaAnalyzer(config)
+        if ollama.models:
+            self.analyzers.append(ollama)
+            logger.info("✅ Ollama analyzer initialized")
+        
+        if not self.analyzers:
+            logger.error("❌ No LLM analyzers available")
+    
+    def analyze_universe(self, universe_name: str, tickers: List[str]) -> Dict:
+        """Run all analyzers on a universe."""
+        all_results = []
+        
+        with ThreadPoolExecutor(max_workers=len(self.analyzers)) as executor:
+            futures = []
+            for analyzer in self.analyzers:
+                future = executor.submit(
+                    analyzer.analyze, universe_name, tickers
+                )
+                futures.append(future)
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result(timeout=180)
+                    if result.get("selections"):
+                        all_results.append(result)
+                except Exception as e:
+                    logger.error(f"Analyzer failed: {e}")
+        
+        return self._ensemble_vote(all_results)
+    
+    def _ensemble_vote(self, results: List[Dict]) -> Dict:
+        """Vote across all analyzer results."""
+        if not results:
+            return {"selections": [], "ensemble_stats": {}}
+        
+        all_votes = {}
+        all_data = {}
+        all_models = set()
+        
+        for result in results:
+            # Collect models from consensus
+            models_used = result.get("consensus", {}).get("models_used", [])
+            if isinstance(models_used, list):
+                all_models.update(models_used)
+            
+            for sel in result.get("selections", []):
+                ticker = sel.get("ticker", "").upper()
+                if ticker:
+                    all_votes[ticker] = all_votes.get(ticker, 0) + 1
+                    if ticker not in all_data:
+                        all_data[ticker] = {
+                            "returns": [],
+                            "confidences": [],
+                            "rationales": [],
+                            "models": []
+                        }
+                    all_data[ticker]["returns"].append(sel.get("expected_return", 0.5))
+                    all_data[ticker]["confidences"].append(sel.get("confidence", "Medium"))
+                    all_data[ticker]["rationales"].append(sel.get("rationale", ""))
+                    
+                    # Collect models for this ticker
+                    models = sel.get("models", [])
+                    if isinstance(models, list):
+                        all_data[ticker]["models"].extend(models)
+                        all_models.update(models)
+        
+        sorted_votes = sorted(
+            all_votes.items(),
+            key=lambda x: (x[1], sum(all_data[x[0]]["returns"]) / len(all_data[x[0]]["returns"])),
+            reverse=True
+        )
+        
+        top_tickers = [t for t, _ in sorted_votes[:self.config.get("TOP_N", 3)]]
+        
+        selections = []
+        for ticker in top_tickers:
+            data = all_data[ticker]
+            avg_return = sum(data["returns"]) / len(data["returns"])
+            
+            conf_counts = {}
+            for c in data["confidences"]:
+                conf_counts[c] = conf_counts.get(c, 0) + 1
+            top_conf = max(conf_counts, key=conf_counts.get)
+            
+            # Get unique models for this ticker
+            unique_models = list(set(data["models"]))
+            unique_models = [m for m in unique_models if m and m != 'unknown']
+            
+            selections.append({
+                "ticker": ticker,
+                "expected_return": round(avg_return, 2),
+                "confidence": top_conf,
+                "rationale": data["rationales"][0] if data["rationales"] else "",
+                "votes": all_votes[ticker],
+                "models": unique_models[:10]  # Limit to 10 models for display
+            })
+        
+        return {
+            "selections": selections,
+            "ensemble_stats": {
+                "total_analyzers": len(results),
+                "total_votes": sum(all_votes.values()),
+                "ticker_votes": all_votes,
+                "models_used": sorted(list(all_models))
+            }
+        }
