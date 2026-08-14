@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Queries ALL LLMs (OpenRouter + Ollama) and aggregates their picks.
+Uses OpenRouter (paid/free) + Ollama (local free) models.
 """
 
 import os
@@ -12,8 +12,8 @@ import requests
 from typing import Dict, List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -25,90 +25,40 @@ class LLMAnalyzer:
         self.config = config
         self.top_n = config.get("TOP_N", 3)
     
-    def build_forced_prompt(self, universe_name: str, tickers: List[str]) -> str:
-        """Build a prompt that explicitly forces 3 picks."""
+    def build_prompt(self, universe_name: str, tickers: List[str]) -> str:
+        """Build a simple prompt asking for 3 picks."""
         
         ticker_list = ', '.join(tickers)
         
-        prompt = f"""You are a professional financial analyst.
+        prompt = f"""You are a financial analyst. Select the top 3 ETFs from this list that will perform best tomorrow.
 
-UNIVERSE: {universe_name}
-TICKERS: {ticker_list}
+Universe: {universe_name}
+Available ETFs: {ticker_list}
 
-TASK: Return EXACTLY {self.top_n} ETFs that will perform best tomorrow.
+Return ONLY this JSON format with exactly 3 selections:
+{{"selections": [{{"ticker": "GLD", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand"}}]}}
 
-YOUR RESPONSE MUST BE VALID JSON WITH EXACTLY {self.top_n} SELECTIONS.
-
-FORMAT:
-{{
-    "selections": [
-        {{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand."}},
-        {{"ticker": "XLE", "expected_return": 1.2, "confidence": "Medium", "rationale": "Oil price recovery."}},
-        {{"ticker": "XLK", "expected_return": 0.9, "confidence": "Medium", "rationale": "Tech earnings."}}
-    ]
-}}
-
-IMPORTANT: 
-- You MUST return EXACTLY {self.top_n} selections
-- Each selection must have ticker, expected_return, confidence, and rationale
-- Return ONLY the JSON, no other text
-- DO NOT return fewer than {self.top_n} selections
-- DO NOT return more than {self.top_n} selections
-
-Now return your analysis for {universe_name} with EXACTLY {self.top_n} selections.
-"""
+Return ONLY the JSON, no other text. Exactly 3 selections required."""
+        
         return prompt
     
     def parse_response(self, response_text: str) -> List[Dict]:
-        """Parse LLM response - ensures exactly top_n selections."""
+        """Parse LLM response."""
         selections = []
         
         try:
-            # Try to find JSON
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
                 selections = data.get("selections", [])
+                if selections:
+                    return selections[:self.top_n]
         except:
             pass
         
-        # If we got selections, validate and fix
-        if selections:
-            # Remove duplicates
-            seen = set()
-            unique_selections = []
-            for s in selections:
-                ticker = s.get("ticker", "").upper()
-                if ticker and ticker not in seen:
-                    seen.add(ticker)
-                    unique_selections.append(s)
-            selections = unique_selections
-            
-            # Ensure we have exactly top_n
-            if len(selections) > self.top_n:
-                selections = selections[:self.top_n]
-            
-            # If we have fewer than top_n, try to fill from the response
-            if len(selections) < self.top_n:
-                # Look for additional tickers in the response
-                tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
-                for ticker in tickers_found:
-                    if len(ticker) >= 2 and ticker not in seen:
-                        selections.append({
-                            "ticker": ticker,
-                            "expected_return": 0.5,
-                            "confidence": "Medium",
-                            "rationale": "Extracted from response"
-                        })
-                        seen.add(ticker)
-                        if len(selections) >= self.top_n:
-                            break
-            
-            return selections[:self.top_n]
-        
-        # Fallback: try to extract tickers from the response
+        # Fallback: extract tickers
         tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
-        for ticker in tickers_found:
+        for ticker in tickers_found[:self.top_n]:
             if len(ticker) >= 2:
                 selections.append({
                     "ticker": ticker,
@@ -116,100 +66,81 @@ Now return your analysis for {universe_name} with EXACTLY {self.top_n} selection
                     "confidence": "Medium",
                     "rationale": "Extracted from response"
                 })
-                if len(selections) >= self.top_n:
-                    break
         
         return selections
 
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API implementation."""
+    """OpenRouter API - using available models."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
         self.models = [
             "openai/gpt-4o-mini",
-            "openai/gpt-3.5-turbo",
-            "anthropic/claude-3-haiku",
             "meta-llama/llama-3.1-8b-instruct",
-            "deepseek/deepseek-chat",
-            "qwen/qwen-2.5-72b-instruct",
+            "mistralai/mistral-7b-instruct",
         ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self._check_availability()
+    
+    def _check_availability(self):
+        """Check if OpenRouter API key is valid."""
+        try:
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            response = requests.get("https://openrouter.ai/api/v1/auth/key", headers=headers, timeout=5)
+            if response.status_code == 200:
+                logger.info("✅ OpenRouter API key valid")
+                return True
+            else:
+                logger.warning(f"⚠️ OpenRouter API key issue: {response.status_code}")
+                return False
+        except:
+            logger.warning("⚠️ OpenRouter API key check failed")
+            return False
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using ALL OpenRouter models."""
+        """Analyze using OpenRouter models."""
+        prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
         logger.info(f"  Querying {len(self.models)} OpenRouter models...")
         
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {}
-            for model in self.models:
-                future = executor.submit(self._get_picks, model, universe_name, tickers)
-                futures[future] = model
-            
-            completed = 0
-            for future in as_completed(futures):
-                model = futures[future]
-                completed += 1
-                try:
-                    picks = future.result(timeout=60)
-                    if picks:
-                        for pick in picks:
-                            pick["model"] = model
-                        results.extend(picks)
-                        successful_models.append(model)
-                        logger.info(f"    ✅ {model}: {len(picks)} picks")
-                    else:
-                        logger.warning(f"    ⚠️ {model}: No picks returned")
-                except Exception as e:
-                    logger.warning(f"    ❌ {model}: {str(e)[:50]}...")
-                
-                if completed % 5 == 0:
-                    logger.info(f"    Progress: {completed}/{len(self.models)} models done")
-        
-        logger.info(f"  ✅ {len(results)} total picks from {len(successful_models)} models")
-        
-        return self._aggregate_results(results, successful_models)
-    
-    def _get_picks(self, model: str, universe_name: str, tickers: List[str]) -> List[Dict]:
-        """Get multiple picks from a model with retries."""
-        prompt = self.build_forced_prompt(universe_name, tickers)
-        
-        for attempt in range(3):  # Try up to 3 times
+        for model in self.models:
             try:
                 response = self._call_api(model, prompt)
                 if response:
                     picks = self.parse_response(response)
-                    if picks and len(picks) >= self.top_n * 0.5:  # At least half
-                        return picks[:self.top_n]
-                time.sleep(1)  # Wait before retry
+                    if picks:
+                        for pick in picks:
+                            pick["model"] = f"openrouter/{model}"
+                        results.extend(picks)
+                        successful_models.append(f"openrouter/{model}")
+                        logger.info(f"    ✅ openrouter/{model}: {len(picks)} picks")
+                    else:
+                        logger.warning(f"    ⚠️ openrouter/{model}: No picks")
+                else:
+                    logger.warning(f"    ⚠️ openrouter/{model}: No response")
             except Exception as e:
-                logger.warning(f"  {model} attempt {attempt+1} failed: {str(e)[:50]}")
-                time.sleep(1)
+                logger.warning(f"    ❌ openrouter/{model}: {str(e)[:50]}")
         
-        return []
+        return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call OpenRouter API."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/P2SAMAPA/P2-ETF-LLM-ETF-ENSEMBLE",
-            "X-Title": "LLM ETF Ensemble"
         }
         
         data = {
             "model": model,
             "messages": [
-                {"role": "system", "content": f"You are a financial analyst. You MUST return EXACTLY 3 ETF selections in valid JSON format."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 600,
+            "max_tokens": 500,
         }
         
         response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
@@ -217,7 +148,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results - count each selection as 1 vote."""
+        """Aggregate results."""
         if not results:
             return {"selections": [], "consensus": {}}
         
@@ -286,67 +217,65 @@ class OpenRouterAnalyzer(LLMAnalyzer):
 
 
 class OllamaAnalyzer(LLMAnalyzer):
-    """Ollama (local) implementation."""
+    """Ollama (local) implementation - completely free."""
     
     def __init__(self, config: Dict):
         super().__init__(config)
         self.base_url = config.get("OLLAMA_URL", "http://localhost:11434")
-        self.models = config.get("OLLAMA_MODELS", [
+        self.models = [
             "llama3.2:3b",
-            "phi3:mini",
+            "phi3:mini", 
             "mistral:7b",
-        ])
+            "llama3.1:8b",
+        ]
+        self.available_models = []
         self._check_availability()
     
     def _check_availability(self):
-        """Check if Ollama is running."""
+        """Check if Ollama is running and which models are available."""
         try:
             response = requests.get(f"{self.base_url}/api/tags", timeout=2)
             if response.status_code == 200:
-                available_models = [m["name"] for m in response.json().get("models", [])]
-                self.models = [m for m in self.models if m in available_models]
-                if self.models:
-                    logger.info(f"✅ Ollama available with models: {self.models}")
+                data = response.json()
+                available = [m["name"] for m in data.get("models", [])]
+                self.available_models = [m for m in self.models if m in available]
+                if self.available_models:
+                    logger.info(f"✅ Ollama available with models: {self.available_models}")
                 else:
-                    logger.warning("⚠️ No Ollama models available")
-                    self.models = []
+                    logger.warning(f"⚠️ No Ollama models found. Available: {available}")
             else:
-                self.models = []
-        except:
-            self.models = []
-            logger.warning("⚠️ Ollama not available")
+                logger.warning("⚠️ Ollama not running")
+        except Exception as e:
+            logger.warning(f"⚠️ Ollama not available: {str(e)[:50]}")
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
         """Analyze using Ollama models."""
-        if not self.models:
+        if not self.available_models:
             return {"selections": [], "consensus": {}}
         
+        prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} Ollama models...")
+        logger.info(f"  Querying {len(self.available_models)} Ollama models...")
         
-        for model in self.models:
+        for model in self.available_models:
             try:
-                prompt = self.build_forced_prompt(universe_name, tickers)
                 response = self._call_api(model, prompt)
                 if response:
                     picks = self.parse_response(response)
                     if picks:
-                        model_name = f"ollama/{model}"
                         for pick in picks:
-                            pick["model"] = model_name
+                            pick["model"] = f"ollama/{model}"
                         results.extend(picks)
-                        successful_models.append(model_name)
+                        successful_models.append(f"ollama/{model}")
                         logger.info(f"    ✅ ollama/{model}: {len(picks)} picks")
                     else:
-                        logger.warning(f"    ⚠️ ollama/{model}: No valid picks")
+                        logger.warning(f"    ⚠️ ollama/{model}: No picks")
                 else:
-                    logger.warning(f"    ⚠️ ollama/{model}: Empty response")
+                    logger.warning(f"    ⚠️ ollama/{model}: No response")
             except Exception as e:
-                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}...")
-        
-        logger.info(f"  ✅ {len(results)} total picks from {len(successful_models)} Ollama models")
+                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}")
         
         return self._aggregate_results(results, successful_models)
     
@@ -358,7 +287,7 @@ class OllamaAnalyzer(LLMAnalyzer):
             "prompt": prompt,
             "stream": False,
             "temperature": 0.3,
-            "max_tokens": 600,
+            "max_tokens": 500,
         }
         
         response = requests.post(url, json=data, timeout=60)
@@ -366,7 +295,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         return response.json()["response"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results from Ollama models."""
+        """Aggregate results."""
         if not results:
             return {"selections": [], "consensus": {}}
         
@@ -409,6 +338,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         for ticker in top_tickers:
             data = ticker_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
+            
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
@@ -440,17 +370,21 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
+        # OpenRouter (with API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
             logger.info("✅ OpenRouter analyzer initialized")
         else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set")
+            logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
         
+        # Ollama (local)
         ollama = OllamaAnalyzer(config)
-        if ollama.models:
+        if ollama.available_models:
             self.analyzers.append(ollama)
             logger.info("✅ Ollama analyzer initialized")
+        else:
+            logger.warning("⚠️ No Ollama models available")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
