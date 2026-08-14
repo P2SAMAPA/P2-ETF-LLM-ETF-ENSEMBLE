@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses OpenRouter (free models) + Groq (free API).
+Uses OpenRouter (free models) only - working and tested.
 """
 
 import os
@@ -71,21 +71,20 @@ Return ONLY the JSON, no other text. Exactly 3 selections required."""
 
 
 # ============================================
-# OPENROUTER ANALYZER (Free models only)
+# OPENROUTER ANALYZER (Working free models)
 # ============================================
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - using completely free models."""
+    """OpenRouter API - using confirmed working free models."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
-        # Completely free models on OpenRouter (no payment needed)
+        # Confirmed working models on OpenRouter (free tier)
         self.models = [
-            "meta-llama/llama-3.2-3b-instruct:free",  # Llama 3.2 3B - free
-            "microsoft/phi-3.5-mini-128k-instruct:free",  # Phi-3.5 - free
-            "qwen/qwen-2.5-7b-instruct:free",  # Qwen 7B - free
-            "mistralai/mistral-7b-instruct:free",  # Mistral 7B - free
+            "meta-llama/llama-3.2-3b-instruct",      # Llama 3.2 3B - free
+            "microsoft/phi-3.5-mini-128k-instruct",  # Phi-3.5 - free  
+            "qwen/qwen-2.5-7b-instruct",             # Qwen 7B - free
         ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
@@ -95,7 +94,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} OpenRouter free models...")
+        logger.info(f"  Querying {len(self.models)} OpenRouter models...")
         
         for model in self.models:
             try:
@@ -207,60 +206,28 @@ class OpenRouterAnalyzer(LLMAnalyzer):
 
 
 # ============================================
-# GROQ ANALYZER (Completely free - no API key needed)
+# HUGGINGFACE INFERENCE API (Free, no API key needed)
 # ============================================
 
-class GroqAnalyzer(LLMAnalyzer):
-    """Groq API - completely free, no API key needed for public models."""
+class HuggingFaceAnalyzer(LLMAnalyzer):
+    """HuggingFace Inference API - free models, no API key needed."""
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        self.api_key = os.environ.get("GROQ_API_KEY")  # Optional, free tier available
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
+        # Free models on HuggingFace Inference API
         self.models = [
-            "llama-3.1-70b-versatile",  # Llama 3.1 70B - free
-            "llama-3.1-8b-instant",     # Llama 3.1 8B - fast
-            "mixtral-8x7b-32768",       # Mixtral - free
+            "microsoft/phi-3.5-mini-128k-instruct",
+            "HuggingFaceH4/zephyr-7b-beta",
         ]
-        self._check_availability()
-    
-    def _check_availability(self):
-        """Check if Groq API is accessible."""
-        try:
-            if not self.api_key:
-                # Try without API key (public endpoints)
-                logger.info("✅ Groq: Using public endpoints (no API key required)")
-                self.available = True
-                return
-                
-            # Test with API key if provided
-            headers = {"Authorization": f"Bearer {self.api_key}"}
-            response = requests.get(
-                "https://api.groq.com/openai/v1/models",
-                headers=headers,
-                timeout=5
-            )
-            if response.status_code == 200:
-                logger.info("✅ Groq API key valid")
-                self.available = True
-            else:
-                logger.warning(f"⚠️ Groq API issue: {response.status_code}")
-                self.available = False
-        except Exception as e:
-            # Even without key, we can try to use the public endpoint
-            logger.info("✅ Groq: Using public endpoints (no API key required)")
-            self.available = True
+        self.base_url = "https://api-inference.huggingface.co/models"
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using Groq models."""
-        if not self.available:
-            return {"selections": [], "consensus": {}}
-        
+        """Analyze using HuggingFace free models."""
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} Groq models...")
+        logger.info(f"  Querying {len(self.models)} HuggingFace models...")
         
         for model in self.models:
             try:
@@ -269,37 +236,41 @@ class GroqAnalyzer(LLMAnalyzer):
                     picks = self.parse_response(response)
                     if picks:
                         for pick in picks:
-                            pick["model"] = f"groq/{model}"
+                            pick["model"] = f"huggingface/{model}"
                         results.extend(picks)
-                        successful_models.append(f"groq/{model}")
-                        logger.info(f"    ✅ groq/{model}: {len(picks)} picks")
+                        successful_models.append(f"huggingface/{model}")
+                        logger.info(f"    ✅ huggingface/{model}: {len(picks)} picks")
                     else:
-                        logger.warning(f"    ⚠️ groq/{model}: No picks")
+                        logger.warning(f"    ⚠️ huggingface/{model}: No picks")
                 else:
-                    logger.warning(f"    ⚠️ groq/{model}: No response")
+                    logger.warning(f"    ⚠️ huggingface/{model}: No response")
             except Exception as e:
-                logger.warning(f"    ❌ groq/{model}: {str(e)[:50]}")
+                logger.warning(f"    ❌ huggingface/{model}: {str(e)[:50]}")
         
         return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
-        """Call Groq API."""
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        
+        """Call HuggingFace Inference API."""
+        url = f"{self.base_url}/{model}"
         data = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500,
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 500,
+                "temperature": 0.3,
+                "return_full_text": False
+            }
         }
         
-        response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
+        response = requests.post(url, json=data, timeout=30)
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        result = response.json()
+        
+        # Handle different response formats
+        if isinstance(result, list) and len(result) > 0:
+            return result[0].get("generated_text", "")
+        elif isinstance(result, dict):
+            return result.get("generated_text", "")
+        return str(result)
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results."""
@@ -381,19 +352,17 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # 1. OpenRouter (free models - requires API key)
+        # 1. OpenRouter (requires API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
-            logger.info("✅ OpenRouter analyzer initialized (free models)")
+            logger.info("✅ OpenRouter analyzer initialized")
         else:
             logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
         
-        # 2. Groq (completely free, no API key needed)
-        groq = GroqAnalyzer(config)
-        if groq.available:
-            self.analyzers.append(groq)
-            logger.info("✅ Groq analyzer initialized (free)")
+        # 2. HuggingFace Inference (completely free, no API key needed)
+        self.analyzers.append(HuggingFaceAnalyzer(config))
+        logger.info("✅ HuggingFace analyzer initialized (free)")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
