@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Queries LLMs directly for market analysis and ETF picks.
+Queries ALL LLMs for market analysis and aggregates their picks.
 """
 
 import os
@@ -12,6 +12,7 @@ import requests
 from typing import Dict, List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -93,60 +94,96 @@ Return ONLY the JSON, no other text. Use TODAY'S date ({datetime.now().strftime(
 
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API implementation."""
+    """OpenRouter API implementation - queries ALL models."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
-        # Updated with working model names
-        self.models = config.get("OPENROUTER_MODELS", [
-            "openai/gpt-4o-mini",  # Fast and cheap
-            "meta-llama/llama-3.1-70b-instruct",  # Good quality
-            "mistralai/mistral-7b-instruct",  # Fast
-            "google/gemini-flash-1.5",  # Google's fast model
-        ])
+        # ALL available models
+        self.models = [
+            # OpenAI
+            "openai/gpt-4o",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4-turbo",
+            "openai/gpt-3.5-turbo",
+            # Anthropic
+            "anthropic/claude-3.5-sonnet",
+            "anthropic/claude-3-opus",
+            "anthropic/claude-3-haiku",
+            # Meta
+            "meta-llama/llama-3.1-405b-instruct",
+            "meta-llama/llama-3.1-70b-instruct",
+            "meta-llama/llama-3.1-8b-instruct",
+            # Google
+            "google/gemini-2.0-flash-exp",
+            "google/gemini-flash-1.5",
+            "google/gemini-pro-1.5",
+            # Mistral
+            "mistralai/mistral-large-2407",
+            "mistralai/mistral-7b-instruct",
+            "mistralai/mixtral-8x7b-instruct",
+            # Other
+            "cohere/command-r-plus",
+            "deepseek/deepseek-chat",
+            "qwen/qwen-2.5-72b-instruct",
+        ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using OpenRouter models."""
+        """Analyze using ALL OpenRouter models in parallel."""
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         
-        # Try models in order until one works
-        for model in self.models:
-            try:
-                logger.info(f"  Querying OpenRouter: {model}")
-                response = self._call_api(model, prompt)
-                selections = self.parse_response(response)
-                if selections:
-                    for sel in selections:
-                        sel["model"] = model
-                    results.extend(selections)
-                    break  # Stop after first successful model
-                else:
-                    logger.warning(f"  {model} returned no selections")
-            except Exception as e:
-                logger.warning(f"  {model} failed: {str(e)[:50]}...")
-                continue
+        logger.info(f"  Querying {len(self.models)} OpenRouter models in parallel...")
         
-        if not results:
-            # Fallback: try all models one more time with lower temperature
-            for model in self.models[:2]:
+        # Query all models in parallel
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {}
+            for model in self.models:
+                future = executor.submit(self._call_api_safe, model, prompt)
+                futures[future] = model
+            
+            completed = 0
+            for future in as_completed(futures):
+                model = futures[future]
+                completed += 1
                 try:
-                    logger.info(f"  Retrying with {model} (fallback)")
-                    response = self._call_api(model, prompt, temperature=0.5)
-                    selections = self.parse_response(response)
-                    if selections:
-                        for sel in selections:
-                            sel["model"] = f"{model}(fallback)"
-                        results.extend(selections)
-                        break
-                except:
-                    continue
+                    response = future.result(timeout=60)
+                    if response:
+                        selections = self.parse_response(response)
+                        if selections:
+                            for sel in selections:
+                                sel["model"] = model
+                            results.extend(selections)
+                            logger.info(f"    ✅ {model}: {len(selections)} picks")
+                        else:
+                            logger.warning(f"    ⚠️ {model}: No valid selections")
+                    else:
+                        logger.warning(f"    ⚠️ {model}: Empty response")
+                except Exception as e:
+                    logger.warning(f"    ❌ {model}: {str(e)[:50]}...")
+                
+                # Progress update every 5 models
+                if completed % 5 == 0:
+                    logger.info(f"    Progress: {completed}/{len(self.models)} models done")
+        
+        logger.info(f"  ✅ {len(results)} total selections from {len(self.models)} models")
         
         return self._aggregate_results(results)
     
-    def _call_api(self, model: str, prompt: str, temperature: float = 0.3) -> str:
+    def _call_api_safe(self, model: str, prompt: str) -> Optional[str]:
+        """Call OpenRouter API with retries."""
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                return self._call_api(model, prompt)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                else:
+                    raise
+    
+    def _call_api(self, model: str, prompt: str) -> str:
         """Call OpenRouter API."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -161,21 +198,23 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 {"role": "system", "content": "You are a professional financial analyst with real-time market data access. Always respond in valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": temperature,
+            "temperature": 0.3,
             "max_tokens": 600,
         }
         
-        response = requests.post(self.base_url, json=data, headers=headers, timeout=45)
+        response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict]) -> Dict:
-        """Aggregate results from multiple models."""
+        """Aggregate results from ALL models."""
         if not results:
             return {"selections": [], "consensus": {}}
         
+        # Count votes and collect data per ticker
         ticker_scores = {}
         ticker_data = {}
+        total_responses = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
@@ -194,6 +233,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
                 ticker_data[ticker]["models"].append(r.get("model", "unknown"))
         
+        # Sort by votes first, then by average expected return
         sorted_tickers = sorted(
             ticker_scores.items(),
             key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
@@ -206,6 +246,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         for ticker in top_tickers:
             data = ticker_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
+            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
@@ -223,8 +264,9 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": len(results),
-                "ticker_scores": ticker_scores
+                "total_votes": total_responses,
+                "ticker_scores": ticker_scores,
+                "models_used": list(set([r.get("model", "unknown") for r in results]))
             }
         }
 
@@ -236,14 +278,16 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # OpenRouter
+        # OpenRouter (with API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
-            logger.info("✅ OpenRouter analyzer initialized")
+            logger.info("✅ OpenRouter analyzer initialized (ALL models)")
+        else:
+            logger.warning("⚠️ OPENROUTER_API_KEY not set")
         
         if not self.analyzers:
-            logger.warning("⚠️ No LLM analyzers available")
+            logger.error("❌ No LLM analyzers available")
     
     def analyze_universe(self, universe_name: str, tickers: List[str]) -> Dict:
         """Run all analyzers on a universe."""
@@ -259,7 +303,7 @@ class EnsembleAnalyzer:
             
             for future in as_completed(futures):
                 try:
-                    result = future.result(timeout=120)
+                    result = future.result(timeout=180)  # 3 minutes for all models
                     if result.get("selections"):
                         all_results.append(result)
                 except Exception as e:
@@ -316,14 +360,20 @@ class EnsembleAnalyzer:
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
                 "votes": all_votes[ticker],
-                "models": list(set(data["models"]))
+                "models": list(set(data["models"]))[:10]  # Show up to 10 models
             })
+        
+        # Count unique models used
+        all_models = set()
+        for data in all_data.values():
+            all_models.update(data["models"])
         
         return {
             "selections": selections,
             "ensemble_stats": {
                 "total_analyzers": len(results),
                 "total_votes": sum(all_votes.values()),
-                "ticker_votes": all_votes
+                "ticker_votes": all_votes,
+                "models_used": list(all_models)
             }
         }
