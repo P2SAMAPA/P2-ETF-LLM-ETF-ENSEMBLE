@@ -191,38 +191,42 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results from ALL models - correctly track which models voted for which ticker."""
+        """Aggregate results from ALL models - correctly count votes."""
         if not results:
             return {"selections": [], "consensus": {}}
         
-        # Track votes per ticker
+        # Count votes per ticker
         ticker_votes = {}
         ticker_data = {}
-        total_responses = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             model = r.get("model", "unknown")
             
-            if ticker:
-                if ticker not in ticker_votes:
-                    ticker_votes[ticker] = 0
-                    ticker_data[ticker] = {
-                        "returns": [],
-                        "confidences": [],
-                        "rationales": [],
-                        "models": []  # Only models that voted for THIS ticker
-                    }
+            if not ticker:
+                continue
                 
-                # Count this as a vote for this ticker
-                ticker_votes[ticker] += 1
-                ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
-                ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
-                ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
-                
-                # Only add this model if it's not already in the list for this ticker
-                if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
-                    ticker_data[ticker]["models"].append(model)
+            # Initialize if first time seeing this ticker
+            if ticker not in ticker_votes:
+                ticker_votes[ticker] = 0
+                ticker_data[ticker] = {
+                    "returns": [],
+                    "confidences": [],
+                    "rationales": [],
+                    "models": []
+                }
+            
+            # Increment vote count for this ticker
+            ticker_votes[ticker] += 1
+            
+            # Store data for this vote
+            ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
+            ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
+            ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
+            
+            # Add model if not already in list for this ticker
+            if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
+                ticker_data[ticker]["models"].append(model)
         
         # Sort by votes (descending), then by average return
         sorted_tickers = sorted(
@@ -250,17 +254,17 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],  # Number of models that picked this ticker
+                "votes": ticker_votes[ticker],  # This is the total count
                 "models": data["models"]  # Only models that voted for this ticker
             })
         
-        # All unique models used across all selections
+        # All unique models used
         all_models_used = list(set(successful_models))
         
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": total_responses,
+                "total_votes": len(results),
                 "ticker_votes": ticker_votes,
                 "models_used": all_models_used
             }
@@ -347,35 +351,36 @@ class OllamaAnalyzer(LLMAnalyzer):
         return response.json()["response"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results from Ollama models - correctly track which models voted for which ticker."""
+        """Aggregate results from Ollama models."""
         if not results:
             return {"selections": [], "consensus": {}}
         
         ticker_votes = {}
         ticker_data = {}
-        total_responses = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             model = r.get("model", "unknown")
             
-            if ticker:
-                if ticker not in ticker_votes:
-                    ticker_votes[ticker] = 0
-                    ticker_data[ticker] = {
-                        "returns": [],
-                        "confidences": [],
-                        "rationales": [],
-                        "models": []
-                    }
+            if not ticker:
+                continue
                 
-                ticker_votes[ticker] += 1
-                ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
-                ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
-                ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
-                
-                if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
-                    ticker_data[ticker]["models"].append(model)
+            if ticker not in ticker_votes:
+                ticker_votes[ticker] = 0
+                ticker_data[ticker] = {
+                    "returns": [],
+                    "confidences": [],
+                    "rationales": [],
+                    "models": []
+                }
+            
+            ticker_votes[ticker] += 1
+            ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
+            ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
+            ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
+            
+            if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
+                ticker_data[ticker]["models"].append(model)
         
         sorted_tickers = sorted(
             ticker_votes.items(),
@@ -408,7 +413,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": total_responses,
+                "total_votes": len(results),
                 "ticker_votes": ticker_votes,
                 "models_used": all_models_used
             }
@@ -527,8 +532,8 @@ class EnsembleAnalyzer:
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": all_votes[ticker],  # Total votes across all analyzers
-                "models": data["models"][:10]  # Show up to 10 models
+                "votes": all_votes[ticker],
+                "models": data["models"][:10]
             })
         
         return {
