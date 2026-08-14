@@ -32,15 +32,9 @@ UNIVERSES = {
 # LLM CONFIGURATION
 # ============================================
 
-# ---------- Ollama Cloud (FREE models!) ----------
+# ---------- Ollama Cloud (FREE Nemotron!) ----------
 # Get your API key from: https://ollama.com/settings/keys
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
-
-# Ollama Cloud URL - try different endpoints
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "")
-
-# ---------- OpenRouter (Fallback) ----------
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # ---------- General Settings ----------
 TOP_N = 3
@@ -61,16 +55,11 @@ def print_config():
     print("\n--- LLM Providers ---")
     
     if OLLAMA_API_KEY:
-        print("✅ Ollama Cloud: Enabled (FREE models!)")
-        print(f"   URL: {OLLAMA_URL or 'auto-detect'}")
+        print("✅ NVIDIA Nemotron: Enabled (FREE!)")
+        print("   Model: nemotron-3-nano:30b")
     else:
-        print("❌ Ollama Cloud: Disabled (no API key)")
+        print("❌ NVIDIA Nemotron: Disabled (no API key)")
         print("   Get your key from: https://ollama.com/settings/keys")
-    
-    if OPENROUTER_API_KEY:
-        print("✅ OpenRouter: Enabled (fallback)")
-    else:
-        print("❌ OpenRouter: Disabled (no API key)")
     print("="*50 + "\n")
 
 
