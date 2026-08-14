@@ -99,21 +99,15 @@ class OpenRouterAnalyzer(LLMAnalyzer):
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
-        # Confirmed working models on OpenRouter
         self.models = [
-            # OpenAI
             "openai/gpt-4o",
             "openai/gpt-4o-mini",
             "openai/gpt-4-turbo",
             "openai/gpt-3.5-turbo",
-            # Anthropic
             "anthropic/claude-3-haiku",
-            # Meta
             "meta-llama/llama-3.1-70b-instruct",
             "meta-llama/llama-3.1-8b-instruct",
-            # Mistral
             "mistralai/mistral-large-2407",
-            # Others
             "deepseek/deepseek-chat",
             "qwen/qwen-2.5-72b-instruct",
         ]
@@ -159,10 +153,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         
         logger.info(f"  ✅ {len(results)} total selections from {len(successful_models)} models")
         
-        # Store successful models for tracking
-        self.last_successful_models = successful_models
-        
-        return self._aggregate_results(results)
+        return self._aggregate_results(results, successful_models)
     
     def _call_api_safe(self, model: str, prompt: str) -> Optional[str]:
         """Call OpenRouter API with retries."""
@@ -199,72 +190,75 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     
-    def _aggregate_results(self, results: List[Dict]) -> Dict:
+    def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results from ALL models."""
         if not results:
             return {"selections": [], "consensus": {}}
         
-        ticker_scores = {}
+        # Count votes per ticker
+        ticker_votes = {}
         ticker_data = {}
         total_responses = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             if ticker:
-                if ticker not in ticker_scores:
-                    ticker_scores[ticker] = 0
+                if ticker not in ticker_votes:
+                    ticker_votes[ticker] = 0
                     ticker_data[ticker] = {
                         "returns": [],
                         "confidences": [],
                         "rationales": [],
                         "models": []
                     }
-                ticker_scores[ticker] += 1
+                ticker_votes[ticker] += 1
                 ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
                 ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
                 ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
                 ticker_data[ticker]["models"].append(r.get("model", "unknown"))
         
+        # Sort by votes (descending), then by average return
         sorted_tickers = sorted(
-            ticker_scores.items(),
+            ticker_votes.items(),
             key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
             reverse=True
         )
         
+        # Take top N
         top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
         
         selections = []
         for ticker in top_tickers:
             data = ticker_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
+            
+            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
             top_conf = max(conf_counts, key=conf_counts.get)
             
-            # Get unique models for this ticker
-            unique_models = list(set(data["models"]))
-            # Filter out 'unknown'
-            unique_models = [m for m in unique_models if m != 'unknown']
+            # Unique models that voted for this ticker
+            unique_models = list(set([m for m in data["models"] if m and m != 'unknown']))
             
             selections.append({
                 "ticker": ticker,
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_scores[ticker],
-                "models": unique_models  # Include models that voted for this ticker
+                "votes": ticker_votes[ticker],  # Number of models that picked this ticker
+                "models": unique_models
             })
         
-        # Get all models used (from successful models)
-        all_models = list(set([r.get("model", "unknown") for r in results if r.get("model") != "unknown"]))
+        # All unique models used
+        all_models_used = list(set(successful_models))
         
         return {
             "selections": selections,
             "consensus": {
                 "total_votes": total_responses,
-                "ticker_scores": ticker_scores,
-                "models_used": all_models
+                "ticker_votes": ticker_votes,
+                "models_used": all_models_used
             }
         }
 
@@ -331,7 +325,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         
         logger.info(f"  ✅ {len(results)} total selections from {len(successful_models)} Ollama models")
         
-        return self._aggregate_results(results)
+        return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call Ollama API."""
@@ -348,34 +342,34 @@ class OllamaAnalyzer(LLMAnalyzer):
         response.raise_for_status()
         return response.json()["response"]
     
-    def _aggregate_results(self, results: List[Dict]) -> Dict:
+    def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results from Ollama models."""
         if not results:
             return {"selections": [], "consensus": {}}
         
-        ticker_scores = {}
+        ticker_votes = {}
         ticker_data = {}
         total_responses = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             if ticker:
-                if ticker not in ticker_scores:
-                    ticker_scores[ticker] = 0
+                if ticker not in ticker_votes:
+                    ticker_votes[ticker] = 0
                     ticker_data[ticker] = {
                         "returns": [],
                         "confidences": [],
                         "rationales": [],
                         "models": []
                     }
-                ticker_scores[ticker] += 1
+                ticker_votes[ticker] += 1
                 ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
                 ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
                 ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
                 ticker_data[ticker]["models"].append(r.get("model", "unknown"))
         
         sorted_tickers = sorted(
-            ticker_scores.items(),
+            ticker_votes.items(),
             key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
             reverse=True
         )
@@ -391,26 +385,25 @@ class OllamaAnalyzer(LLMAnalyzer):
                 conf_counts[c] = conf_counts.get(c, 0) + 1
             top_conf = max(conf_counts, key=conf_counts.get)
             
-            unique_models = list(set(data["models"]))
-            unique_models = [m for m in unique_models if m != 'unknown']
+            unique_models = list(set([m for m in data["models"] if m and m != 'unknown']))
             
             selections.append({
                 "ticker": ticker,
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_scores[ticker],
+                "votes": ticker_votes[ticker],
                 "models": unique_models
             })
         
-        all_models = list(set([r.get("model", "unknown") for r in results if r.get("model") != "unknown"]))
+        all_models_used = list(set(successful_models))
         
         return {
             "selections": selections,
             "consensus": {
                 "total_votes": total_responses,
-                "ticker_scores": ticker_scores,
-                "models_used": all_models
+                "ticker_votes": ticker_votes,
+                "models_used": all_models_used
             }
         }
 
@@ -466,16 +459,13 @@ class EnsembleAnalyzer:
         if not results:
             return {"selections": [], "ensemble_stats": {}}
         
+        # Aggregate all votes across all analyzers
         all_votes = {}
         all_data = {}
         all_models = set()
         
         for result in results:
-            # Collect models from consensus
-            models_used = result.get("consensus", {}).get("models_used", [])
-            if isinstance(models_used, list):
-                all_models.update(models_used)
-            
+            # Get selections from this analyzer
             for sel in result.get("selections", []):
                 ticker = sel.get("ticker", "").upper()
                 if ticker:
@@ -496,13 +486,20 @@ class EnsembleAnalyzer:
                     if isinstance(models, list):
                         all_data[ticker]["models"].extend(models)
                         all_models.update(models)
+            
+            # Also collect models from consensus
+            consensus_models = result.get("consensus", {}).get("models_used", [])
+            if isinstance(consensus_models, list):
+                all_models.update(consensus_models)
         
+        # Sort by votes (descending), then by average return
         sorted_votes = sorted(
             all_votes.items(),
             key=lambda x: (x[1], sum(all_data[x[0]]["returns"]) / len(all_data[x[0]]["returns"])),
             reverse=True
         )
         
+        # Take top N
         top_tickers = [t for t, _ in sorted_votes[:self.config.get("TOP_N", 3)]]
         
         selections = []
@@ -510,22 +507,22 @@ class EnsembleAnalyzer:
             data = all_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
             
+            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
             top_conf = max(conf_counts, key=conf_counts.get)
             
-            # Get unique models for this ticker
-            unique_models = list(set(data["models"]))
-            unique_models = [m for m in unique_models if m and m != 'unknown']
+            # Unique models that voted for this ticker
+            unique_models = list(set([m for m in data["models"] if m and m != 'unknown']))
             
             selections.append({
                 "ticker": ticker,
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": all_votes[ticker],
-                "models": unique_models[:10]  # Limit to 10 models for display
+                "votes": all_votes[ticker],  # Total votes across all analyzers
+                "models": unique_models[:10]  # Show up to 10 models
             })
         
         return {
