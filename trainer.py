@@ -11,7 +11,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, Optional
-from huggingface_hub import HfApi, create_repo
+from huggingface_hub import HfApi
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -83,7 +83,7 @@ def run_trainer() -> Dict:
         "run_date": run_date,
         "universes": {},
         "ensemble_summary": {},
-        "models_used": []  # Track all models used
+        "models_used": []
     }
 
     all_models_used = set()
