@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses OpenRouter (free models) only - working and tested.
+Uses OpenRouter + Ollama Cloud (with API key) for free models like Nemotron.
 """
 
 import os
@@ -71,25 +71,23 @@ Return ONLY the JSON, no other text. Exactly 3 selections required."""
 
 
 # ============================================
-# OPENROUTER ANALYZER (Working free models)
+# OPENROUTER ANALYZER
 # ============================================
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - using confirmed working free models."""
+    """OpenRouter API - requires credits."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
-        # Confirmed working models on OpenRouter (free tier)
         self.models = [
-            "meta-llama/llama-3.2-3b-instruct",      # Llama 3.2 3B - free
-            "microsoft/phi-3.5-mini-128k-instruct",  # Phi-3.5 - free  
-            "qwen/qwen-2.5-7b-instruct",             # Qwen 7B - free
+            "meta-llama/llama-3.2-3b-instruct",
+            "microsoft/phi-3-mini-128k-instruct",
         ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using OpenRouter free models."""
+        """Analyze using OpenRouter models."""
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
@@ -206,71 +204,108 @@ class OpenRouterAnalyzer(LLMAnalyzer):
 
 
 # ============================================
-# HUGGINGFACE INFERENCE API (Free, no API key needed)
+# OLLAMA CLOUD ANALYZER (FREE MODELS!)
 # ============================================
 
-class HuggingFaceAnalyzer(LLMAnalyzer):
-    """HuggingFace Inference API - free models, no API key needed."""
+class OllamaCloudAnalyzer(LLMAnalyzer):
+    """Ollama Cloud API - free models like Nemotron, Llama, etc."""
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        # Free models on HuggingFace Inference API
+        self.api_key = os.environ.get("OLLAMA_API_KEY") or config.get("OLLAMA_API_KEY")
+        self.base_url = os.environ.get("OLLAMA_URL") or config.get("OLLAMA_URL", "https://api.ollama.com")
+        
+        # Free models available on Ollama Cloud
         self.models = [
-            "microsoft/phi-3.5-mini-128k-instruct",
-            "HuggingFaceH4/zephyr-7b-beta",
+            "nemotron-3-nano:4b",           # NVIDIA Nemotron - FREE
+            "nemotron-3-nano:30b",          # NVIDIA Nemotron (larger) - FREE
+            "llama3.2:3b",                  # Llama 3.2 - FREE
+            "phi3:mini",                    # Phi-3 Mini - FREE
+            "mistral:7b",                   # Mistral 7B - FREE
         ]
-        self.base_url = "https://api-inference.huggingface.co/models"
+        self.available_models = []
+        self._check_availability()
+    
+    def _check_availability(self):
+        """Check if Ollama Cloud API key is valid."""
+        if not self.api_key:
+            logger.warning("⚠️ OLLAMA_API_KEY not set - skipping Ollama Cloud")
+            return
+        
+        try:
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            response = requests.get(
+                f"{self.base_url}/api/tags",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                available = [m["name"] for m in data.get("models", [])]
+                self.available_models = [m for m in self.models if m in available]
+                if self.available_models:
+                    logger.info(f"✅ Ollama Cloud available with models: {self.available_models}")
+                else:
+                    logger.warning(f"⚠️ No Ollama Cloud models found. Available: {available}")
+            else:
+                logger.warning(f"⚠️ Ollama Cloud API issue: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Ollama Cloud not available: {str(e)[:50]}")
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using HuggingFace free models."""
+        """Analyze using Ollama Cloud models."""
+        if not self.available_models:
+            return {"selections": [], "consensus": {}}
+        
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} HuggingFace models...")
+        logger.info(f"  Querying {len(self.available_models)} Ollama Cloud models...")
         
-        for model in self.models:
+        for model in self.available_models:
             try:
                 response = self._call_api(model, prompt)
                 if response:
                     picks = self.parse_response(response)
                     if picks:
                         for pick in picks:
-                            pick["model"] = f"huggingface/{model}"
+                            pick["model"] = f"ollama/{model}"
                         results.extend(picks)
-                        successful_models.append(f"huggingface/{model}")
-                        logger.info(f"    ✅ huggingface/{model}: {len(picks)} picks")
+                        successful_models.append(f"ollama/{model}")
+                        logger.info(f"    ✅ ollama/{model}: {len(picks)} picks")
                     else:
-                        logger.warning(f"    ⚠️ huggingface/{model}: No picks")
+                        logger.warning(f"    ⚠️ ollama/{model}: No picks")
                 else:
-                    logger.warning(f"    ⚠️ huggingface/{model}: No response")
+                    logger.warning(f"    ⚠️ ollama/{model}: No response")
             except Exception as e:
-                logger.warning(f"    ❌ huggingface/{model}: {str(e)[:50]}")
+                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}")
         
         return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
-        """Call HuggingFace Inference API."""
-        url = f"{self.base_url}/{model}"
-        data = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 500,
-                "temperature": 0.3,
-                "return_full_text": False
-            }
+        """Call Ollama Cloud API."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
         }
         
-        response = requests.post(url, json=data, timeout=30)
-        response.raise_for_status()
-        result = response.json()
+        data = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.3,
+            "max_tokens": 500,
+        }
         
-        # Handle different response formats
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get("generated_text", "")
-        elif isinstance(result, dict):
-            return result.get("generated_text", "")
-        return str(result)
+        response = requests.post(
+            f"{self.base_url}/api/generate",
+            json=data,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["response"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results."""
@@ -342,7 +377,7 @@ class HuggingFaceAnalyzer(LLMAnalyzer):
 
 
 # ============================================
-# ENSEMBLE ANALYZER (Combines all providers)
+# ENSEMBLE ANALYZER
 # ============================================
 
 class EnsembleAnalyzer:
@@ -352,7 +387,7 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # 1. OpenRouter (requires API key)
+        # 1. OpenRouter (requires credits)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
@@ -360,9 +395,13 @@ class EnsembleAnalyzer:
         else:
             logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
         
-        # 2. HuggingFace Inference (completely free, no API key needed)
-        self.analyzers.append(HuggingFaceAnalyzer(config))
-        logger.info("✅ HuggingFace analyzer initialized (free)")
+        # 2. Ollama Cloud (FREE - with API key)
+        ollama = OllamaCloudAnalyzer(config)
+        if ollama.available_models:
+            self.analyzers.append(ollama)
+            logger.info("✅ Ollama Cloud analyzer initialized (FREE models!)")
+        else:
+            logger.warning("⚠️ Ollama Cloud not available - check OLLAMA_API_KEY")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
