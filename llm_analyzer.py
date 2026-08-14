@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses OpenRouter + Ollama Cloud (with API key) for free models like Nemotron.
+Uses Ollama Cloud with API key for free models like Nemotron.
 """
 
 import os
@@ -71,139 +71,6 @@ Return ONLY the JSON, no other text. Exactly 3 selections required."""
 
 
 # ============================================
-# OPENROUTER ANALYZER
-# ============================================
-
-class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - requires credits."""
-    
-    def __init__(self, config: Dict, api_key: str):
-        super().__init__(config)
-        self.api_key = api_key
-        self.models = [
-            "meta-llama/llama-3.2-3b-instruct",
-            "microsoft/phi-3-mini-128k-instruct",
-        ]
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-    
-    def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using OpenRouter models."""
-        prompt = self.build_prompt(universe_name, tickers)
-        results = []
-        successful_models = []
-        
-        logger.info(f"  Querying {len(self.models)} OpenRouter models...")
-        
-        for model in self.models:
-            try:
-                response = self._call_api(model, prompt)
-                if response:
-                    picks = self.parse_response(response)
-                    if picks:
-                        for pick in picks:
-                            pick["model"] = f"openrouter/{model}"
-                        results.extend(picks)
-                        successful_models.append(f"openrouter/{model}")
-                        logger.info(f"    ✅ openrouter/{model}: {len(picks)} picks")
-                    else:
-                        logger.warning(f"    ⚠️ openrouter/{model}: No picks")
-                else:
-                    logger.warning(f"    ⚠️ openrouter/{model}: No response")
-            except Exception as e:
-                logger.warning(f"    ❌ openrouter/{model}: {str(e)[:50]}")
-        
-        return self._aggregate_results(results, successful_models)
-    
-    def _call_api(self, model: str, prompt: str) -> str:
-        """Call OpenRouter API."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500,
-        }
-        
-        response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    
-    def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results."""
-        if not results:
-            return {"selections": [], "consensus": {}}
-        
-        ticker_votes = {}
-        ticker_data = {}
-        
-        for r in results:
-            ticker = r.get("ticker", "").upper()
-            model = r.get("model", "unknown")
-            
-            if not ticker:
-                continue
-                
-            if ticker not in ticker_votes:
-                ticker_votes[ticker] = 0
-                ticker_data[ticker] = {
-                    "returns": [],
-                    "confidences": [],
-                    "rationales": [],
-                    "models": []
-                }
-            
-            ticker_votes[ticker] += 1
-            ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
-            ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
-            ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
-            
-            if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
-                ticker_data[ticker]["models"].append(model)
-        
-        sorted_tickers = sorted(
-            ticker_votes.items(),
-            key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
-            reverse=True
-        )
-        
-        top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
-        
-        selections = []
-        for ticker in top_tickers:
-            data = ticker_data[ticker]
-            avg_return = sum(data["returns"]) / len(data["returns"])
-            
-            conf_counts = {}
-            for c in data["confidences"]:
-                conf_counts[c] = conf_counts.get(c, 0) + 1
-            top_conf = max(conf_counts, key=conf_counts.get)
-            
-            selections.append({
-                "ticker": ticker,
-                "expected_return": round(avg_return, 2),
-                "confidence": top_conf,
-                "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],
-                "models": data["models"]
-            })
-        
-        return {
-            "selections": selections,
-            "consensus": {
-                "total_votes": len(results),
-                "ticker_votes": ticker_votes,
-                "models_used": list(set(successful_models))
-            }
-        }
-
-
-# ============================================
 # OLLAMA CLOUD ANALYZER (FREE MODELS!)
 # ============================================
 
@@ -212,33 +79,54 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        self.api_key = os.environ.get("OLLAMA_API_KEY") or config.get("OLLAMA_API_KEY")
-        self.base_url = os.environ.get("OLLAMA_URL") or config.get("OLLAMA_URL", "https://api.ollama.com")
+        
+        # Try multiple ways to get the API key
+        self.api_key = (
+            os.environ.get("OLLAMA_API_KEY") or 
+            os.environ.get("OLLAMA_KEY") or 
+            config.get("OLLAMA_API_KEY") or
+            config.get("OLLAMA_KEY")
+        )
+        
+        self.base_url = (
+            os.environ.get("OLLAMA_URL") or 
+            config.get("OLLAMA_URL", "https://api.ollama.com")
+        )
         
         # Free models available on Ollama Cloud
         self.models = [
             "nemotron-3-nano:4b",           # NVIDIA Nemotron - FREE
-            "nemotron-3-nano:30b",          # NVIDIA Nemotron (larger) - FREE
             "llama3.2:3b",                  # Llama 3.2 - FREE
             "phi3:mini",                    # Phi-3 Mini - FREE
             "mistral:7b",                   # Mistral 7B - FREE
         ]
         self.available_models = []
+        
+        # Log the key status (without exposing it)
+        if self.api_key:
+            logger.info(f"✅ OLLAMA_API_KEY found (length: {len(self.api_key)})")
+        else:
+            logger.warning("⚠️ OLLAMA_API_KEY not found in environment variables")
+            logger.warning("   Please set OLLAMA_API_KEY in GitHub Secrets or .env file")
+        
         self._check_availability()
     
     def _check_availability(self):
         """Check if Ollama Cloud API key is valid."""
         if not self.api_key:
-            logger.warning("⚠️ OLLAMA_API_KEY not set - skipping Ollama Cloud")
+            logger.warning("⚠️ No API key available - skipping Ollama Cloud")
             return
         
         try:
             headers = {"Authorization": f"Bearer {self.api_key}"}
+            logger.info(f"🔍 Checking Ollama Cloud connection to {self.base_url}...")
+            
             response = requests.get(
                 f"{self.base_url}/api/tags",
                 headers=headers,
-                timeout=5
+                timeout=10
             )
+            
             if response.status_code == 200:
                 data = response.json()
                 available = [m["name"] for m in data.get("models", [])]
@@ -246,11 +134,22 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
                 if self.available_models:
                     logger.info(f"✅ Ollama Cloud available with models: {self.available_models}")
                 else:
-                    logger.warning(f"⚠️ No Ollama Cloud models found. Available: {available}")
+                    logger.warning(f"⚠️ No matching models found. Available: {available}")
+                    # Try to use all available models as fallback
+                    if available:
+                        self.available_models = available[:4]
+                        logger.info(f"   Using fallback models: {self.available_models}")
+            elif response.status_code == 401:
+                logger.error("❌ Ollama Cloud authentication failed - invalid API key")
+                logger.info("   Get your API key from: https://ollama.com/settings/keys")
             else:
                 logger.warning(f"⚠️ Ollama Cloud API issue: {response.status_code}")
+                logger.warning(f"   Response: {response.text[:100]}")
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"⚠️ Cannot connect to Ollama Cloud at {self.base_url}")
+            logger.info("   Make sure you have internet access and the URL is correct")
         except Exception as e:
-            logger.warning(f"⚠️ Ollama Cloud not available: {str(e)[:50]}")
+            logger.warning(f"⚠️ Ollama Cloud not available: {str(e)[:100]}")
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
         """Analyze using Ollama Cloud models."""
@@ -387,24 +286,15 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # 1. OpenRouter (requires credits)
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if openrouter_key:
-            self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
-            logger.info("✅ OpenRouter analyzer initialized")
-        else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
-        
-        # 2. Ollama Cloud (FREE - with API key)
+        # Ollama Cloud (FREE - with API key)
         ollama = OllamaCloudAnalyzer(config)
         if ollama.available_models:
             self.analyzers.append(ollama)
             logger.info("✅ Ollama Cloud analyzer initialized (FREE models!)")
-        else:
-            logger.warning("⚠️ Ollama Cloud not available - check OLLAMA_API_KEY")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
+            logger.info("   Please set OLLAMA_API_KEY in your environment or .env file")
     
     def analyze_universe(self, universe_name: str, tickers: List[str]) -> Dict:
         """Run all analyzers on a universe."""
