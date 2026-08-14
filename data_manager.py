@@ -4,6 +4,7 @@ data_manager.py  —  Data loading and validation for LLM ETF Ensemble
 
 import os
 import logging
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 from huggingface_hub import hf_hub_download
@@ -11,7 +12,7 @@ from huggingface_hub import hf_hub_download
 logger = logging.getLogger(__name__)
 
 
-def load_master_data(token: str = None) -> tuple:
+def load_master_data(token: str = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load master data from HuggingFace.
     
