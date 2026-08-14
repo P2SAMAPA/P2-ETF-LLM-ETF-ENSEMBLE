@@ -8,7 +8,7 @@ on:
 jobs:
   run-ensemble:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     
     steps:
     - name: Checkout code
@@ -24,27 +24,28 @@ jobs:
       run: |
         pip install -r requirements.txt
     
+    - name: Debug - Check if secrets are available
+      run: |
+        echo "HF_TOKEN exists: ${{ secrets.HF_TOKEN != '' }}"
+        echo "OLLAMA_API_KEY exists: ${{ secrets.OLLAMA_API_KEY != '' }}"
+        echo "OPENROUTER_API_KEY exists: ${{ secrets.OPENROUTER_API_KEY != '' }}"
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    
     - name: Run LLM ETF Ensemble
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+        OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
         OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       run: |
         python trainer.py
     
-    - name: Upload results to HuggingFace Dataset
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-        # Results are already uploaded by trainer.py
-        echo "✅ Results uploaded to HuggingFace dataset"
-    
-    - name: Trigger Streamlit Cloud Deploy
-      run: |
-        # Trigger Streamlit Cloud to redeploy
-        curl -X POST "https://api.streamlit.io/v1/deploy" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "repo": "P2SAMAPA/P2-ETF-LLM-ETF-ENSEMBLE",
-            "branch": "main",
-            "main_file": "streamlit_app.py"
-          }' || echo "Streamlit Cloud webhook failed (may need manual setup)"
+    - name: Upload results artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: llm-ensemble-results
+        path: llm_etf_ensemble_*.json
+        retention-days: 30
