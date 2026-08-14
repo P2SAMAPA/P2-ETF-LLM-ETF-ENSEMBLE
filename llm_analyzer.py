@@ -25,34 +25,105 @@ class LLMAnalyzer:
         self.config = config
         self.top_n = config.get("TOP_N", 3)
     
-    def build_single_pick_prompt(self, universe_name: str, tickers: List[str], 
-                                  existing_picks: List[str] = None) -> str:
-        """Build a prompt asking for the single best ETF, excluding already picked ones."""
+    def build_forced_prompt(self, universe_name: str, tickers: List[str]) -> str:
+        """Build a prompt that explicitly forces 3 picks."""
         
         ticker_list = ', '.join(tickers)
-        
-        # Build exclusion text
-        exclude_text = ""
-        if existing_picks and len(existing_picks) > 0:
-            exclude_text = f"\n\nIMPORTANT: You have already picked these ETFs: {', '.join(existing_picks)}. Do NOT pick them again. Pick a DIFFERENT ETF."
         
         prompt = f"""You are a professional financial analyst.
 
 UNIVERSE: {universe_name}
-TICKERS TO CHOOSE FROM: {ticker_list}
+TICKERS: {ticker_list}
 
-TASK: Select the SINGLE BEST ETF from this universe that will outperform tomorrow.{exclude_text}
+TASK: Return EXACTLY {self.top_n} ETFs that will perform best tomorrow.
 
-Return JSON with exactly this format:
-{{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand."}}
+YOUR RESPONSE MUST BE VALID JSON WITH EXACTLY {self.top_n} SELECTIONS.
 
-Return ONLY the JSON, no other text.
+FORMAT:
+{{
+    "selections": [
+        {{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand."}},
+        {{"ticker": "XLE", "expected_return": 1.2, "confidence": "Medium", "rationale": "Oil price recovery."}},
+        {{"ticker": "XLK", "expected_return": 0.9, "confidence": "Medium", "rationale": "Tech earnings."}}
+    ]
+}}
+
+IMPORTANT: 
+- You MUST return EXACTLY {self.top_n} selections
+- Each selection must have ticker, expected_return, confidence, and rationale
+- Return ONLY the JSON, no other text
+- DO NOT return fewer than {self.top_n} selections
+- DO NOT return more than {self.top_n} selections
+
+Now return your analysis for {universe_name} with EXACTLY {self.top_n} selections.
 """
         return prompt
+    
+    def parse_response(self, response_text: str) -> List[Dict]:
+        """Parse LLM response - ensures exactly top_n selections."""
+        selections = []
+        
+        try:
+            # Try to find JSON
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                selections = data.get("selections", [])
+        except:
+            pass
+        
+        # If we got selections, validate and fix
+        if selections:
+            # Remove duplicates
+            seen = set()
+            unique_selections = []
+            for s in selections:
+                ticker = s.get("ticker", "").upper()
+                if ticker and ticker not in seen:
+                    seen.add(ticker)
+                    unique_selections.append(s)
+            selections = unique_selections
+            
+            # Ensure we have exactly top_n
+            if len(selections) > self.top_n:
+                selections = selections[:self.top_n]
+            
+            # If we have fewer than top_n, try to fill from the response
+            if len(selections) < self.top_n:
+                # Look for additional tickers in the response
+                tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
+                for ticker in tickers_found:
+                    if len(ticker) >= 2 and ticker not in seen:
+                        selections.append({
+                            "ticker": ticker,
+                            "expected_return": 0.5,
+                            "confidence": "Medium",
+                            "rationale": "Extracted from response"
+                        })
+                        seen.add(ticker)
+                        if len(selections) >= self.top_n:
+                            break
+            
+            return selections[:self.top_n]
+        
+        # Fallback: try to extract tickers from the response
+        tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
+        for ticker in tickers_found:
+            if len(ticker) >= 2:
+                selections.append({
+                    "ticker": ticker,
+                    "expected_return": 0.5,
+                    "confidence": "Medium",
+                    "rationale": "Extracted from response"
+                })
+                if len(selections) >= self.top_n:
+                    break
+        
+        return selections
 
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API implementation - forces 3 picks by making 3 calls with exclusion."""
+    """OpenRouter API implementation."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
@@ -68,138 +139,59 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using ALL OpenRouter models - force 3 picks per model."""
+        """Analyze using ALL OpenRouter models."""
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} OpenRouter models (3 picks each)...")
+        logger.info(f"  Querying {len(self.models)} OpenRouter models...")
         
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {}
             for model in self.models:
-                # Submit 3 jobs per model with exclusion of previous picks
-                future1 = executor.submit(
-                    self._get_single_pick, 
-                    model, 
-                    universe_name, 
-                    tickers, 
-                    []  # No exclusions for first pick
-                )
-                futures[future1] = (model, 1)
+                future = executor.submit(self._get_picks, model, universe_name, tickers)
+                futures[future] = model
             
-            # We need to collect results to feed back for exclusion
-            # This requires a two-pass approach:
-            # 1. Get first picks
-            # 2. Get second picks (excluding first)
-            # 3. Get third picks (excluding first and second)
-            
-            # First pass: get all first picks
-            first_results = {}
-            for future in as_completed([f for f in futures if futures[f][1] == 1]):
-                model, pick_num = futures[future]
+            completed = 0
+            for future in as_completed(futures):
+                model = futures[future]
+                completed += 1
                 try:
-                    result = future.result(timeout=60)
-                    if result:
-                        result["model"] = model
-                        result["pick_number"] = pick_num
-                        first_results[model] = result
-                        if model not in successful_models:
-                            successful_models.append(model)
-                        logger.info(f"    ✅ {model} pick 1: {result.get('ticker', 'N/A')}")
+                    picks = future.result(timeout=60)
+                    if picks:
+                        for pick in picks:
+                            pick["model"] = model
+                        results.extend(picks)
+                        successful_models.append(model)
+                        logger.info(f"    ✅ {model}: {len(picks)} picks")
                     else:
-                        logger.warning(f"    ⚠️ {model} pick 1: No result")
+                        logger.warning(f"    ⚠️ {model}: No picks returned")
                 except Exception as e:
-                    logger.warning(f"    ❌ {model} pick 1: {str(e)[:50]}...")
-            
-            # Second pass: get second picks (excluding first)
-            second_futures = {}
-            for model in self.models:
-                first_pick = first_results.get(model)
-                existing = [first_pick.get("ticker")] if first_pick else []
-                future = executor.submit(
-                    self._get_single_pick, 
-                    model, 
-                    universe_name, 
-                    tickers, 
-                    existing
-                )
-                second_futures[future] = (model, 2)
-            
-            second_results = {}
-            for future in as_completed(second_futures):
-                model, pick_num = second_futures[future]
-                try:
-                    result = future.result(timeout=60)
-                    if result:
-                        result["model"] = model
-                        result["pick_number"] = pick_num
-                        second_results[model] = result
-                        if model not in successful_models:
-                            successful_models.append(model)
-                        logger.info(f"    ✅ {model} pick 2: {result.get('ticker', 'N/A')}")
-                    else:
-                        logger.warning(f"    ⚠️ {model} pick 2: No result")
-                except Exception as e:
-                    logger.warning(f"    ❌ {model} pick 2: {str(e)[:50]}...")
-            
-            # Third pass: get third picks (excluding first and second)
-            third_futures = {}
-            for model in self.models:
-                first_pick = first_results.get(model)
-                second_pick = second_results.get(model)
-                existing = []
-                if first_pick:
-                    existing.append(first_pick.get("ticker"))
-                if second_pick:
-                    existing.append(second_pick.get("ticker"))
-                future = executor.submit(
-                    self._get_single_pick, 
-                    model, 
-                    universe_name, 
-                    tickers, 
-                    existing
-                )
-                third_futures[future] = (model, 3)
-            
-            for future in as_completed(third_futures):
-                model, pick_num = third_futures[future]
-                try:
-                    result = future.result(timeout=60)
-                    if result:
-                        result["model"] = model
-                        result["pick_number"] = pick_num
-                        results.append(result)
-                        if model not in successful_models:
-                            successful_models.append(model)
-                        logger.info(f"    ✅ {model} pick 3: {result.get('ticker', 'N/A')}")
-                    else:
-                        logger.warning(f"    ⚠️ {model} pick 3: No result")
-                except Exception as e:
-                    logger.warning(f"    ❌ {model} pick 3: {str(e)[:50]}...")
-            
-            # Add first and second results to final results
-            for result in first_results.values():
-                results.append(result)
-            for result in second_results.values():
-                results.append(result)
+                    logger.warning(f"    ❌ {model}: {str(e)[:50]}...")
+                
+                if completed % 5 == 0:
+                    logger.info(f"    Progress: {completed}/{len(self.models)} models done")
         
         logger.info(f"  ✅ {len(results)} total picks from {len(successful_models)} models")
         
         return self._aggregate_results(results, successful_models)
     
-    def _get_single_pick(self, model: str, universe_name: str, 
-                         tickers: List[str], existing_picks: List[str]) -> Optional[Dict]:
-        """Get a single pick from a model, excluding already picked ones."""
-        prompt = self.build_single_pick_prompt(universe_name, tickers, existing_picks)
+    def _get_picks(self, model: str, universe_name: str, tickers: List[str]) -> List[Dict]:
+        """Get multiple picks from a model with retries."""
+        prompt = self.build_forced_prompt(universe_name, tickers)
         
-        try:
-            response = self._call_api(model, prompt)
-            if response:
-                return self.parse_single_response(response)
-        except Exception as e:
-            logger.warning(f"  {model} failed: {str(e)[:50]}")
+        for attempt in range(3):  # Try up to 3 times
+            try:
+                response = self._call_api(model, prompt)
+                if response:
+                    picks = self.parse_response(response)
+                    if picks and len(picks) >= self.top_n * 0.5:  # At least half
+                        return picks[:self.top_n]
+                time.sleep(1)  # Wait before retry
+            except Exception as e:
+                logger.warning(f"  {model} attempt {attempt+1} failed: {str(e)[:50]}")
+                time.sleep(1)
         
-        return None
+        return []
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call OpenRouter API."""
@@ -213,42 +205,16 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         data = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a financial analyst. Return ONLY valid JSON with a single ETF selection."},
+                {"role": "system", "content": f"You are a financial analyst. You MUST return EXACTLY 3 ETF selections in valid JSON format."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 300,
+            "max_tokens": 600,
         }
         
         response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
-    
-    def parse_single_response(self, response_text: str) -> Dict:
-        """Parse a single ETF response."""
-        try:
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                if "ticker" in data:
-                    return data
-                elif "selections" in data and data["selections"]:
-                    return data["selections"][0]
-        except:
-            pass
-        
-        # Fallback: extract ticker
-        tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
-        for ticker in tickers_found:
-            if len(ticker) >= 2:
-                return {
-                    "ticker": ticker,
-                    "expected_return": 0.5,
-                    "confidence": "Medium",
-                    "rationale": response_text[:100]
-                }
-        
-        return None
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results - count each selection as 1 vote."""
@@ -351,70 +317,34 @@ class OllamaAnalyzer(LLMAnalyzer):
             logger.warning("⚠️ Ollama not available")
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using Ollama models - force 3 picks per model with exclusion."""
+        """Analyze using Ollama models."""
         if not self.models:
             return {"selections": [], "consensus": {}}
         
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} Ollama models (3 picks each)...")
+        logger.info(f"  Querying {len(self.models)} Ollama models...")
         
         for model in self.models:
-            model_results = []
-            
-            # Pick 1: No exclusions
             try:
-                prompt = self.build_single_pick_prompt(universe_name, tickers, [])
+                prompt = self.build_forced_prompt(universe_name, tickers)
                 response = self._call_api(model, prompt)
                 if response:
-                    result = self.parse_single_response(response)
-                    if result:
+                    picks = self.parse_response(response)
+                    if picks:
                         model_name = f"ollama/{model}"
-                        result["model"] = model_name
-                        result["pick_number"] = 1
-                        model_results.append(result)
-                        if model_name not in successful_models:
-                            successful_models.append(model_name)
-                        logger.info(f"    ✅ ollama/{model} pick 1: {result.get('ticker', 'N/A')}")
+                        for pick in picks:
+                            pick["model"] = model_name
+                        results.extend(picks)
+                        successful_models.append(model_name)
+                        logger.info(f"    ✅ ollama/{model}: {len(picks)} picks")
+                    else:
+                        logger.warning(f"    ⚠️ ollama/{model}: No valid picks")
+                else:
+                    logger.warning(f"    ⚠️ ollama/{model}: Empty response")
             except Exception as e:
-                logger.warning(f"    ❌ ollama/{model} pick 1: {str(e)[:50]}...")
-            
-            # Pick 2: Exclude pick 1
-            if model_results:
-                try:
-                    existing = [model_results[0].get("ticker")]
-                    prompt = self.build_single_pick_prompt(universe_name, tickers, existing)
-                    response = self._call_api(model, prompt)
-                    if response:
-                        result = self.parse_single_response(response)
-                        if result:
-                            model_name = f"ollama/{model}"
-                            result["model"] = model_name
-                            result["pick_number"] = 2
-                            model_results.append(result)
-                            logger.info(f"    ✅ ollama/{model} pick 2: {result.get('ticker', 'N/A')}")
-                except Exception as e:
-                    logger.warning(f"    ❌ ollama/{model} pick 2: {str(e)[:50]}...")
-            
-            # Pick 3: Exclude picks 1 and 2
-            if len(model_results) >= 2:
-                try:
-                    existing = [r.get("ticker") for r in model_results[:2]]
-                    prompt = self.build_single_pick_prompt(universe_name, tickers, existing)
-                    response = self._call_api(model, prompt)
-                    if response:
-                        result = self.parse_single_response(response)
-                        if result:
-                            model_name = f"ollama/{model}"
-                            result["model"] = model_name
-                            result["pick_number"] = 3
-                            model_results.append(result)
-                            logger.info(f"    ✅ ollama/{model} pick 3: {result.get('ticker', 'N/A')}")
-                except Exception as e:
-                    logger.warning(f"    ❌ ollama/{model} pick 3: {str(e)[:50]}...")
-            
-            results.extend(model_results)
+                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}...")
         
         logger.info(f"  ✅ {len(results)} total picks from {len(successful_models)} Ollama models")
         
@@ -428,38 +358,12 @@ class OllamaAnalyzer(LLMAnalyzer):
             "prompt": prompt,
             "stream": False,
             "temperature": 0.3,
-            "max_tokens": 300,
+            "max_tokens": 600,
         }
         
         response = requests.post(url, json=data, timeout=60)
         response.raise_for_status()
         return response.json()["response"]
-    
-    def parse_single_response(self, response_text: str) -> Dict:
-        """Parse a single ETF response."""
-        try:
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                if "ticker" in data:
-                    return data
-                elif "selections" in data and data["selections"]:
-                    return data["selections"][0]
-        except:
-            pass
-        
-        # Fallback: extract ticker
-        tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
-        for ticker in tickers_found:
-            if len(ticker) >= 2:
-                return {
-                    "ticker": ticker,
-                    "expected_return": 0.5,
-                    "confidence": "Medium",
-                    "rationale": response_text[:100]
-                }
-        
-        return None
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results from Ollama models."""
@@ -565,7 +469,7 @@ class EnsembleAnalyzer:
             
             for future in as_completed(futures):
                 try:
-                    result = future.result(timeout=300)
+                    result = future.result(timeout=180)
                     if result.get("selections"):
                         all_results.append(result)
                 except Exception as e:
