@@ -28,4 +28,12 @@ UNIVERSES = {
     ]
 }
 
+# Ollama Configuration
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODELS = [
+    "llama3.2:3b",
+    "phi3:mini",
+    "mistral:7b",
+]
+
 TOP_N = 3
