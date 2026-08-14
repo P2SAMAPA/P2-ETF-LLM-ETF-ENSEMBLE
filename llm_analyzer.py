@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,84 +28,71 @@ class LLMAnalyzer:
     def build_prompt(self, universe_name: str, tickers: List[str]) -> str:
         """Build the prompt for LLM analysis."""
         
-        prompt = f"""You are a professional financial analyst with access to real-time market data, macroeconomic indicators, Fed policy, and global news flow.
+        # Create a strong prompt that forces 3 picks
+        ticker_list = ', '.join(tickers)
+        
+        prompt = f"""You are a professional financial analyst.
 
 UNIVERSE: {universe_name}
-ETF TICKERS TO ANALYZE: {', '.join(tickers)}
+TICKERS: {ticker_list}
 
-Based on your analysis of current market conditions (including but not limited to):
-- Recent price action and technical levels
-- Sector rotation and relative strength
-- Macroeconomic data (inflation, GDP, employment)
-- Federal Reserve policy expectations
-- Global geopolitical risks and opportunities
-- Fund flows and sentiment indicators
+TASK: Select EXACTLY {self.top_n} ETFs that will perform best tomorrow.
 
-IMPORTANT: You MUST select EXACTLY {self.top_n} ETFs. No more, no less.
+RULES:
+- You MUST return EXACTLY {self.top_n} ETFs
+- Each ETF must have a ticker, expected return %, confidence, and rationale
+- Return ONLY valid JSON
 
-Select the top {self.top_n} ETFs from this universe that are MOST LIKELY to outperform in the NEXT US TRADING DAY.
-
-For each selected ETF, provide:
-1. Ticker symbol
-2. Expected return (%) for next trading day
-3. Confidence level (High/Medium/Low)
-4. Brief rationale (1-2 sentences)
-
-Format your response as a JSON object with a "selections" array containing exactly {self.top_n} objects:
+EXAMPLE FORMAT:
 {{
     "selections": [
-        {{
-            "ticker": "GDX",
-            "expected_return": 1.5,
-            "confidence": "High",
-            "rationale": "Gold miners benefit from safe-haven demand amid geopolitical tensions."
-        }},
-        {{
-            "ticker": "XLE",
-            "expected_return": 1.2,
-            "confidence": "Medium",
-            "rationale": "Energy sector benefits from rising oil prices."
-        }},
-        {{
-            "ticker": "XLK",
-            "expected_return": 0.9,
-            "confidence": "Medium",
-            "rationale": "Tech sector shows resilience with strong earnings."
-        }}
+        {{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand."}},
+        {{"ticker": "XLE", "expected_return": 1.2, "confidence": "Medium", "rationale": "Oil prices rising."}},
+        {{"ticker": "XLK", "expected_return": 0.9, "confidence": "Medium", "rationale": "Tech earnings strong."}}
     ]
 }}
 
-Return ONLY the JSON, no other text. Use TODAY'S date ({datetime.now().strftime('%Y-%m-%d')}) for your analysis.
+Now return your analysis for {universe_name} with EXACTLY {self.top_n} selections. JSON only, no other text.
 """
         return prompt
     
     def parse_response(self, response_text: str) -> List[Dict]:
         """Parse LLM response into structured selections."""
         try:
-            import re
+            # Try to find JSON
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
                 selections = data.get("selections", [])
                 if selections:
+                    # Ensure we have exactly top_n selections
+                    if len(selections) > self.top_n:
+                        selections = selections[:self.top_n]
                     return selections
         except:
             pass
         
-        # Fallback: manual parsing
+        # Fallback: try to parse individual ticker lines
         selections = []
         lines = response_text.strip().split('\n')
+        ticker_pattern = re.compile(r'([A-Z]{1,5})\s*[:|]\s*([0-9.]+)%?\s*(?:High|Medium|Low)?', re.IGNORECASE)
+        
         for line in lines:
-            if 'ticker' in line.lower() or 'etf' in line.lower():
-                parts = line.split('|')
-                if len(parts) >= 2:
-                    ticker = parts[0].strip().split(':')[-1].strip()[:5]
-                    selections.append({
-                        "ticker": ticker,
-                        "expected_return": 0.5,
-                        "confidence": "Medium",
-                        "rationale": line.strip()
-                    })
+            match = ticker_pattern.search(line)
+            if match:
+                ticker = match.group(1).upper()
+                try:
+                    ret = float(match.group(2))
+                except:
+                    ret = 0.5
+                selections.append({
+                    "ticker": ticker,
+                    "expected_return": ret,
+                    "confidence": "Medium",
+                    "rationale": line.strip()
+                })
+                if len(selections) >= self.top_n:
+                    break
         
         return selections[:self.top_n]
 
@@ -152,6 +140,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     if response:
                         selections = self.parse_response(response)
                         if selections:
+                            # Ensure each selection has a model tag
                             for sel in selections:
                                 sel["model"] = model
                             results.extend(selections)
@@ -195,7 +184,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         data = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a professional financial analyst with real-time market data access. Always respond in valid JSON."},
+                {"role": "system", "content": "You are a professional financial analyst. Always respond with valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
@@ -207,13 +196,14 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results from ALL models - each selection counts as 1 vote."""
+        """Aggregate results - count each selection as 1 vote."""
         if not results:
             return {"selections": [], "consensus": {}}
         
-        # Count votes per ticker - each selection counts as 1 vote
+        # Count votes per ticker
         ticker_votes = {}
         ticker_data = {}
+        total_selections = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
@@ -222,7 +212,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             if not ticker:
                 continue
                 
-            # Initialize if first time seeing this ticker
+            # Initialize
             if ticker not in ticker_votes:
                 ticker_votes[ticker] = 0
                 ticker_data[ticker] = {
@@ -232,19 +222,17 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     "models": []
                 }
             
-            # Each selection counts as 1 vote
+            # Each selection is 1 vote
             ticker_votes[ticker] += 1
-            
-            # Store data for this vote
             ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
             ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
             ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
             
-            # Add model if not already in list for this ticker
+            # Track unique models
             if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
                 ticker_data[ticker]["models"].append(model)
         
-        # Sort by votes (descending), then by average return
+        # Sort by votes (descending), then by avg return
         sorted_tickers = sorted(
             ticker_votes.items(),
             key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
@@ -270,19 +258,16 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],  # This now counts each selection
-                "models": data["models"]  # Only models that voted for this ticker
+                "votes": ticker_votes[ticker],  # Total selections for this ticker
+                "models": data["models"]  # Unique models that picked this ticker
             })
-        
-        # All unique models used
-        all_models_used = list(set(successful_models))
         
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": len(results),
+                "total_votes": total_selections,
                 "ticker_votes": ticker_votes,
-                "models_used": all_models_used
+                "models_used": list(set(successful_models))
             }
         }
 
@@ -373,6 +358,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         
         ticker_votes = {}
         ticker_data = {}
+        total_selections = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
@@ -424,14 +410,12 @@ class OllamaAnalyzer(LLMAnalyzer):
                 "models": data["models"]
             })
         
-        all_models_used = list(set(successful_models))
-        
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": len(results),
+                "total_votes": total_selections,
                 "ticker_votes": ticker_votes,
-                "models_used": all_models_used
+                "models_used": list(set(successful_models))
             }
         }
 
