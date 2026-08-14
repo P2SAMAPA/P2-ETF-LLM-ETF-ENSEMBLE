@@ -40,6 +40,8 @@ Based on your analysis of current market conditions (including but not limited t
 - Global geopolitical risks and opportunities
 - Fund flows and sentiment indicators
 
+IMPORTANT: You MUST select EXACTLY {self.top_n} ETFs. No more, no less.
+
 Select the top {self.top_n} ETFs from this universe that are MOST LIKELY to outperform in the NEXT US TRADING DAY.
 
 For each selected ETF, provide:
@@ -48,7 +50,7 @@ For each selected ETF, provide:
 3. Confidence level (High/Medium/Low)
 4. Brief rationale (1-2 sentences)
 
-Format your response as JSON:
+Format your response as a JSON object with a "selections" array containing exactly {self.top_n} objects:
 {{
     "selections": [
         {{
@@ -56,6 +58,18 @@ Format your response as JSON:
             "expected_return": 1.5,
             "confidence": "High",
             "rationale": "Gold miners benefit from safe-haven demand amid geopolitical tensions."
+        }},
+        {{
+            "ticker": "XLE",
+            "expected_return": 1.2,
+            "confidence": "Medium",
+            "rationale": "Energy sector benefits from rising oil prices."
+        }},
+        {{
+            "ticker": "XLK",
+            "expected_return": 0.9,
+            "confidence": "Medium",
+            "rationale": "Tech sector shows resilience with strong earnings."
         }}
     ]
 }}
@@ -71,7 +85,9 @@ Return ONLY the JSON, no other text. Use TODAY'S date ({datetime.now().strftime(
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
-                return data.get("selections", [])
+                selections = data.get("selections", [])
+                if selections:
+                    return selections
         except:
             pass
         
@@ -183,7 +199,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 600,
+            "max_tokens": 800,
         }
         
         response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
@@ -191,11 +207,11 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results from ALL models - correctly count votes."""
+        """Aggregate results from ALL models - each selection counts as 1 vote."""
         if not results:
             return {"selections": [], "consensus": {}}
         
-        # Count votes per ticker
+        # Count votes per ticker - each selection counts as 1 vote
         ticker_votes = {}
         ticker_data = {}
         
@@ -216,7 +232,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     "models": []
                 }
             
-            # Increment vote count for this ticker
+            # Each selection counts as 1 vote
             ticker_votes[ticker] += 1
             
             # Store data for this vote
@@ -254,7 +270,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],  # This is the total count
+                "votes": ticker_votes[ticker],  # This now counts each selection
                 "models": data["models"]  # Only models that voted for this ticker
             })
         
@@ -343,7 +359,7 @@ class OllamaAnalyzer(LLMAnalyzer):
             "prompt": prompt,
             "stream": False,
             "temperature": 0.3,
-            "max_tokens": 600,
+            "max_tokens": 800,
         }
         
         response = requests.post(url, json=data, timeout=60)
