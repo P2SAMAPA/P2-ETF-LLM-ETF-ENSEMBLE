@@ -34,11 +34,13 @@ UNIVERSES = {
 
 # ---------- Ollama Cloud (FREE models!) ----------
 # Get your API key from: https://ollama.com/settings/keys
-# Set this in GitHub Secrets as OLLAMA_API_KEY
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 
-# Ollama Cloud URL (default: https://api.ollama.com)
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "https://api.ollama.com")
+# Ollama Cloud URL - try different endpoints
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "")
+
+# ---------- OpenRouter (Fallback) ----------
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # ---------- General Settings ----------
 TOP_N = 3
@@ -59,11 +61,16 @@ def print_config():
     print("\n--- LLM Providers ---")
     
     if OLLAMA_API_KEY:
-        print(f"✅ Ollama Cloud: Enabled (FREE models!)")
-        print(f"   URL: {OLLAMA_URL}")
+        print("✅ Ollama Cloud: Enabled (FREE models!)")
+        print(f"   URL: {OLLAMA_URL or 'auto-detect'}")
     else:
         print("❌ Ollama Cloud: Disabled (no API key)")
         print("   Get your key from: https://ollama.com/settings/keys")
+    
+    if OPENROUTER_API_KEY:
+        print("✅ OpenRouter: Enabled (fallback)")
+    else:
+        print("❌ OpenRouter: Disabled (no API key)")
     print("="*50 + "\n")
 
 
