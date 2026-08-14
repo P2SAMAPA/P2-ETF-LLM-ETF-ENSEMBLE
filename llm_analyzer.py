@@ -2,17 +2,15 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses multiple LLMs to analyze market data and pick top ETFs.
+Queries LLMs directly for market analysis and ETF picks.
 """
 
 import os
 import json
 import logging
 import requests
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from datetime import datetime
-import pandas as pd
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -25,28 +23,27 @@ class LLMAnalyzer:
         self.config = config
         self.top_n = config.get("TOP_N", 3)
         
-    def build_prompt(self, universe_name: str, tickers: List[str], 
-                     data_summary: Dict) -> str:
-        """Build the prompt for LLM analysis."""
+    def build_prompt(self, universe_name: str, tickers: List[str]) -> str:
+        """Build the prompt for LLM analysis - no data needed."""
         
-        prompt = f"""You are a professional financial analyst. Analyze the following ETFs and select the top {self.top_n} that are most likely to outperform in the next 1-3 months.
+        prompt = f"""You are a professional financial analyst with access to real-time market data, macroeconomic indicators, Fed policy, and global news flow.
 
 UNIVERSE: {universe_name}
-ETFS: {', '.join(tickers)}
+ETF TICKERS TO ANALYZE: {', '.join(tickers)}
 
-MARKET DATA SUMMARY:
-{json.dumps(data_summary, indent=2)}
+Based on your analysis of current market conditions (including but not limited to):
+- Recent price action and technical levels
+- Sector rotation and relative strength
+- Macroeconomic data (inflation, GDP, employment)
+- Federal Reserve policy expectations
+- Global geopolitical risks and opportunities
+- Fund flows and sentiment indicators
 
-MACRO CONTEXT:
-- Fed Policy: Recent signals and expectations
-- Inflation Trends: Current CPI/PCE readings
-- Economic Growth: GDP, employment, consumer spending
-- Market Sentiment: VIX, put/call ratios, fund flows
-- Global Risks: Geopolitical, trade, commodity prices
+Select the top {self.top_n} ETFs from this universe that are MOST LIKELY to outperform in the NEXT US TRADING DAY.
 
-For each of the top {self.top_n} ETFs, provide:
+For each selected ETF, provide:
 1. Ticker symbol
-2. Probability of positive return (%)
+2. Expected return (%) for next trading day
 3. Confidence level (High/Medium/Low)
 4. Brief rationale (1-2 sentences)
 
@@ -55,21 +52,20 @@ Format your response as JSON:
     "selections": [
         {{
             "ticker": "GDX",
-            "probability": 75.5,
+            "expected_return": 1.5,
             "confidence": "High",
-            "rationale": "Gold miners benefit from Fed rate cuts and safe-haven demand."
+            "rationale": "Gold miners benefit from safe-haven demand amid geopolitical tensions."
         }}
     ]
 }}
 
-Return ONLY the JSON, no other text.
+Return ONLY the JSON, no other text. Use TODAY'S date ({datetime.now().strftime('%Y-%m-%d')}) for your analysis.
 """
         return prompt
     
     def parse_response(self, response_text: str) -> List[Dict]:
         """Parse LLM response into structured selections."""
         try:
-            # Try to find JSON in the response
             import re
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
@@ -78,21 +74,18 @@ Return ONLY the JSON, no other text.
         except:
             pass
         
-        # Fallback: try to parse manually
+        # Fallback: manual parsing
         selections = []
         lines = response_text.strip().split('\n')
         for line in lines:
             if 'ticker' in line.lower() or 'etf' in line.lower():
-                # Attempt to extract ticker and probability
                 parts = line.split('|')
                 if len(parts) >= 2:
                     ticker = parts[0].strip().split(':')[-1].strip()[:5]
-                    prob = 50.0
-                    conf = "Medium"
                     selections.append({
                         "ticker": ticker,
-                        "probability": prob,
-                        "confidence": conf,
+                        "expected_return": 0.5,
+                        "confidence": "Medium",
                         "rationale": line.strip()
                     })
         
@@ -108,21 +101,21 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         self.models = config.get("OPENROUTER_MODELS", [])
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
-    def analyze(self, universe_name: str, tickers: List[str], 
-                data_summary: Dict) -> Dict:
+    def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
         """Analyze using OpenRouter models."""
-        prompt = self.build_prompt(universe_name, tickers, data_summary)
+        prompt = self.build_prompt(universe_name, tickers)
         results = []
         
         for model in self.models[:2]:  # Use top 2 models for speed
             try:
+                logger.info(f"  Querying OpenRouter: {model}")
                 response = self._call_api(model, prompt)
                 selections = self.parse_response(response)
                 for sel in selections:
                     sel["model"] = model
                 results.extend(selections)
             except Exception as e:
-                logger.error(f"OpenRouter {model} failed: {e}")
+                logger.error(f"  OpenRouter {model} failed: {e}")
         
         return self._aggregate_results(results)
     
@@ -136,7 +129,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         data = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a financial analyst."},
+                {"role": "system", "content": "You are a professional financial analyst with real-time market data access."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
@@ -152,33 +145,40 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         if not results:
             return {"selections": [], "consensus": {}}
         
-        # Count votes per ticker
-        ticker_votes = {}
+        # Weighted scoring: votes + expected return
+        ticker_scores = {}
         ticker_data = {}
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             if ticker:
-                ticker_votes[ticker] = ticker_votes.get(ticker, 0) + 1
-                if ticker not in ticker_data:
+                if ticker not in ticker_scores:
+                    ticker_scores[ticker] = 0
                     ticker_data[ticker] = {
-                        "probabilities": [],
+                        "returns": [],
                         "confidences": [],
-                        "rationales": []
+                        "rationales": [],
+                        "models": []
                     }
-                ticker_data[ticker]["probabilities"].append(r.get("probability", 50))
+                ticker_scores[ticker] += 1  # Each vote counts
+                ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
                 ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
                 ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
+                ticker_data[ticker]["models"].append(r.get("model", "unknown"))
         
-        # Sort by votes
-        sorted_votes = sorted(ticker_votes.items(), key=lambda x: x[1], reverse=True)
-        top_tickers = [t for t, _ in sorted_votes[:self.top_n]]
+        # Sort by votes, then by average expected return
+        sorted_tickers = sorted(
+            ticker_scores.items(),
+            key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
+            reverse=True
+        )
         
-        # Build consensus
+        top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
+        
         selections = []
         for ticker in top_tickers:
             data = ticker_data[ticker]
-            avg_prob = np.mean(data["probabilities"])
+            avg_return = sum(data["returns"]) / len(data["returns"])
             # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
@@ -187,17 +187,18 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             
             selections.append({
                 "ticker": ticker,
-                "probability": round(avg_prob, 1),
+                "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker]
+                "votes": ticker_scores[ticker],
+                "models": list(set(data["models"]))
             })
         
         return {
             "selections": selections,
             "consensus": {
                 "total_votes": len(results),
-                "ticker_votes": ticker_votes
+                "ticker_scores": ticker_scores
             }
         }
 
@@ -210,21 +211,21 @@ class OllamaAnalyzer(LLMAnalyzer):
         self.base_url = config.get("OLLAMA_URL", "http://localhost:11434")
         self.models = config.get("OLLAMA_MODELS", [])
     
-    def analyze(self, universe_name: str, tickers: List[str], 
-                data_summary: Dict) -> Dict:
+    def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
         """Analyze using Ollama models."""
-        prompt = self.build_prompt(universe_name, tickers, data_summary)
+        prompt = self.build_prompt(universe_name, tickers)
         results = []
         
-        for model in self.models[:2]:  # Use top 2 models
+        for model in self.models[:2]:
             try:
+                logger.info(f"  Querying Ollama: {model}")
                 response = self._call_api(model, prompt)
                 selections = self.parse_response(response)
                 for sel in selections:
                     sel["model"] = model
                 results.extend(selections)
             except Exception as e:
-                logger.error(f"Ollama {model} failed: {e}")
+                logger.error(f"  Ollama {model} failed: {e}")
         
         return self._aggregate_results(results)
     
@@ -245,34 +246,41 @@ class OllamaAnalyzer(LLMAnalyzer):
     
     def _aggregate_results(self, results: List[Dict]) -> Dict:
         """Same aggregation as OpenRouter."""
-        # Reuse same aggregation logic
         if not results:
             return {"selections": [], "consensus": {}}
         
-        ticker_votes = {}
+        ticker_scores = {}
         ticker_data = {}
         
         for r in results:
             ticker = r.get("ticker", "").upper()
             if ticker:
-                ticker_votes[ticker] = ticker_votes.get(ticker, 0) + 1
-                if ticker not in ticker_data:
+                if ticker not in ticker_scores:
+                    ticker_scores[ticker] = 0
                     ticker_data[ticker] = {
-                        "probabilities": [],
+                        "returns": [],
                         "confidences": [],
-                        "rationales": []
+                        "rationales": [],
+                        "models": []
                     }
-                ticker_data[ticker]["probabilities"].append(r.get("probability", 50))
+                ticker_scores[ticker] += 1
+                ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
                 ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
                 ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
+                ticker_data[ticker]["models"].append(r.get("model", "unknown"))
         
-        sorted_votes = sorted(ticker_votes.items(), key=lambda x: x[1], reverse=True)
-        top_tickers = [t for t, _ in sorted_votes[:self.top_n]]
+        sorted_tickers = sorted(
+            ticker_scores.items(),
+            key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
+            reverse=True
+        )
+        
+        top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
         
         selections = []
         for ticker in top_tickers:
             data = ticker_data[ticker]
-            avg_prob = np.mean(data["probabilities"])
+            avg_return = sum(data["returns"]) / len(data["returns"])
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
@@ -280,17 +288,18 @@ class OllamaAnalyzer(LLMAnalyzer):
             
             selections.append({
                 "ticker": ticker,
-                "probability": round(avg_prob, 1),
+                "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker]
+                "votes": ticker_scores[ticker],
+                "models": list(set(data["models"]))
             })
         
         return {
             "selections": selections,
             "consensus": {
                 "total_votes": len(results),
-                "ticker_votes": ticker_votes
+                "ticker_scores": ticker_scores
             }
         }
 
@@ -320,8 +329,7 @@ class EnsembleAnalyzer:
         if not self.analyzers:
             logger.warning("⚠️ No LLM analyzers available")
     
-    def analyze_universe(self, universe_name: str, tickers: List[str], 
-                         data_summary: Dict) -> Dict:
+    def analyze_universe(self, universe_name: str, tickers: List[str]) -> Dict:
         """Run all analyzers on a universe."""
         all_results = []
         
@@ -329,7 +337,7 @@ class EnsembleAnalyzer:
             futures = []
             for analyzer in self.analyzers:
                 future = executor.submit(
-                    analyzer.analyze, universe_name, tickers, data_summary
+                    analyzer.analyze, universe_name, tickers
                 )
                 futures.append(future)
             
@@ -359,39 +367,40 @@ class EnsembleAnalyzer:
                     all_votes[ticker] = all_votes.get(ticker, 0) + 1
                     if ticker not in all_data:
                         all_data[ticker] = {
-                            "probabilities": [],
+                            "returns": [],
                             "confidences": [],
                             "rationales": [],
                             "models": []
                         }
-                    all_data[ticker]["probabilities"].append(sel.get("probability", 50))
+                    all_data[ticker]["returns"].append(sel.get("expected_return", 0.5))
                     all_data[ticker]["confidences"].append(sel.get("confidence", "Medium"))
                     all_data[ticker]["rationales"].append(sel.get("rationale", ""))
                     all_data[ticker]["models"].append(sel.get("model", "unknown"))
         
-        # Sort by votes
-        sorted_votes = sorted(all_votes.items(), key=lambda x: x[1], reverse=True)
+        # Sort by votes, then by average return
+        sorted_votes = sorted(
+            all_votes.items(),
+            key=lambda x: (x[1], sum(all_data[x[0]]["returns"]) / len(all_data[x[0]]["returns"])),
+            reverse=True
+        )
+        
         top_tickers = [t for t, _ in sorted_votes[:self.config.get("TOP_N", 3)]]
         
         selections = []
         for ticker in top_tickers:
             data = all_data[ticker]
-            avg_prob = np.mean(data["probabilities"])
+            avg_return = sum(data["returns"]) / len(data["returns"])
             
-            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
             top_conf = max(conf_counts, key=conf_counts.get)
             
-            # Most common rationale (first occurrence)
-            rationale = data["rationales"][0] if data["rationales"] else ""
-            
             selections.append({
                 "ticker": ticker,
-                "probability": round(avg_prob, 1),
+                "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
-                "rationale": rationale,
+                "rationale": data["rationales"][0] if data["rationales"] else "",
                 "votes": all_votes[ticker],
                 "models": list(set(data["models"]))
             })
