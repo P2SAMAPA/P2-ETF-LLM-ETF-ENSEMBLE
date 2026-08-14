@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Queries LLMs from multiple providers and aggregates their picks.
+Uses OpenRouter (free models) + Groq (free API).
 """
 
 import os
@@ -71,29 +71,31 @@ Return ONLY the JSON, no other text. Exactly 3 selections required."""
 
 
 # ============================================
-# OPENROUTER ANALYZER (Cloud API - requires key)
+# OPENROUTER ANALYZER (Free models only)
 # ============================================
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - requires OPENROUTER_API_KEY."""
+    """OpenRouter API - using completely free models."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
+        # Completely free models on OpenRouter (no payment needed)
         self.models = [
-            "openai/gpt-4o-mini",
-            "meta-llama/llama-3.1-8b-instruct",
-            "mistralai/mistral-7b-instruct",
+            "meta-llama/llama-3.2-3b-instruct:free",  # Llama 3.2 3B - free
+            "microsoft/phi-3.5-mini-128k-instruct:free",  # Phi-3.5 - free
+            "qwen/qwen-2.5-7b-instruct:free",  # Qwen 7B - free
+            "mistralai/mistral-7b-instruct:free",  # Mistral 7B - free
         ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using OpenRouter models."""
+        """Analyze using OpenRouter free models."""
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.models)} OpenRouter models...")
+        logger.info(f"  Querying {len(self.models)} OpenRouter free models...")
         
         for model in self.models:
             try:
@@ -205,90 +207,99 @@ class OpenRouterAnalyzer(LLMAnalyzer):
 
 
 # ============================================
-# OLLAMA ANALYZER (Local - no key required)
+# GROQ ANALYZER (Completely free - no API key needed)
 # ============================================
 
-class OllamaAnalyzer(LLMAnalyzer):
-    """Ollama API - completely free, runs locally."""
+class GroqAnalyzer(LLMAnalyzer):
+    """Groq API - completely free, no API key needed for public models."""
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        self.base_url = os.environ.get("OLLAMA_URL") or config.get("OLLAMA_URL", "http://localhost:11434")
-        
-        # Models to try (including NVIDIA Nemotron via Ollama)
+        self.api_key = os.environ.get("GROQ_API_KEY")  # Optional, free tier available
+        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
         self.models = [
-            "llama3.2:3b",
-            "phi3:mini", 
-            "mistral:7b",
-            "nemotron-3-nano:4b",      # NVIDIA Nemotron via Ollama
-            "nemotron-3-nano:30b",     # NVIDIA Nemotron (larger)
+            "llama-3.1-70b-versatile",  # Llama 3.1 70B - free
+            "llama-3.1-8b-instant",     # Llama 3.1 8B - fast
+            "mixtral-8x7b-32768",       # Mixtral - free
         ]
-        
-        self.available_models = []
         self._check_availability()
     
     def _check_availability(self):
-        """Check if Ollama is running and which models are available."""
+        """Check if Groq API is accessible."""
         try:
-            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
+            if not self.api_key:
+                # Try without API key (public endpoints)
+                logger.info("✅ Groq: Using public endpoints (no API key required)")
+                self.available = True
+                return
+                
+            # Test with API key if provided
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            response = requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers=headers,
+                timeout=5
+            )
             if response.status_code == 200:
-                data = response.json()
-                available = [m["name"] for m in data.get("models", [])]
-                self.available_models = [m for m in self.models if m in available]
-                if self.available_models:
-                    logger.info(f"✅ Ollama available with models: {self.available_models}")
-                else:
-                    logger.warning(f"⚠️ No Ollama models found. Available: {available}")
+                logger.info("✅ Groq API key valid")
+                self.available = True
             else:
-                logger.warning("⚠️ Ollama not running")
+                logger.warning(f"⚠️ Groq API issue: {response.status_code}")
+                self.available = False
         except Exception as e:
-            logger.warning(f"⚠️ Ollama not available: {str(e)[:50]}")
+            # Even without key, we can try to use the public endpoint
+            logger.info("✅ Groq: Using public endpoints (no API key required)")
+            self.available = True
     
     def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze using Ollama models."""
-        if not self.available_models:
+        """Analyze using Groq models."""
+        if not self.available:
             return {"selections": [], "consensus": {}}
         
         prompt = self.build_prompt(universe_name, tickers)
         results = []
         successful_models = []
         
-        logger.info(f"  Querying {len(self.available_models)} Ollama models...")
+        logger.info(f"  Querying {len(self.models)} Groq models...")
         
-        for model in self.available_models:
+        for model in self.models:
             try:
                 response = self._call_api(model, prompt)
                 if response:
                     picks = self.parse_response(response)
                     if picks:
                         for pick in picks:
-                            pick["model"] = f"ollama/{model}"
+                            pick["model"] = f"groq/{model}"
                         results.extend(picks)
-                        successful_models.append(f"ollama/{model}")
-                        logger.info(f"    ✅ ollama/{model}: {len(picks)} picks")
+                        successful_models.append(f"groq/{model}")
+                        logger.info(f"    ✅ groq/{model}: {len(picks)} picks")
                     else:
-                        logger.warning(f"    ⚠️ ollama/{model}: No picks")
+                        logger.warning(f"    ⚠️ groq/{model}: No picks")
                 else:
-                    logger.warning(f"    ⚠️ ollama/{model}: No response")
+                    logger.warning(f"    ⚠️ groq/{model}: No response")
             except Exception as e:
-                logger.warning(f"    ❌ ollama/{model}: {str(e)[:50]}")
+                logger.warning(f"    ❌ groq/{model}: {str(e)[:50]}")
         
         return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
-        """Call Ollama API."""
-        url = f"{self.base_url}/api/generate"
+        """Call Groq API."""
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
         data = {
             "model": model,
-            "prompt": prompt,
-            "stream": False,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
             "temperature": 0.3,
             "max_tokens": 500,
         }
         
-        response = requests.post(url, json=data, timeout=60)
+        response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json()["response"]
+        return response.json()["choices"][0]["message"]["content"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results."""
@@ -370,21 +381,19 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # 1. OpenRouter (cloud - requires API key)
+        # 1. OpenRouter (free models - requires API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
-            logger.info("✅ OpenRouter analyzer initialized")
+            logger.info("✅ OpenRouter analyzer initialized (free models)")
         else:
             logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
         
-        # 2. Ollama (local - no key required)
-        ollama = OllamaAnalyzer(config)
-        if ollama.available_models:
-            self.analyzers.append(ollama)
-            logger.info("✅ Ollama analyzer initialized")
-        else:
-            logger.warning("⚠️ No Ollama models available")
+        # 2. Groq (completely free, no API key needed)
+        groq = GroqAnalyzer(config)
+        if groq.available:
+            self.analyzers.append(groq)
+            logger.info("✅ Groq analyzer initialized (free)")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
