@@ -28,12 +28,4 @@ UNIVERSES = {
     ]
 }
 
-# Working OpenRouter models (verified)
-OPENROUTER_MODELS = [
-    "openai/gpt-4o-mini",           # Fast, cheap, reliable
-    "meta-llama/llama-3.1-70b-instruct",  # Good quality
-    "mistralai/mistral-7b-instruct",  # Fast
-    "google/gemini-flash-1.5",      # Google's fast model
-]
-
 TOP_N = 3
