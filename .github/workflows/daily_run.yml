@@ -1,4 +1,4 @@
-name: LLM ETF Ensemble Daily Run
+name: LLM ETF Ensemble Daily Run & Deploy
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
 jobs:
   run-ensemble:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # LLM API calls should be fast
+    timeout-minutes: 30
     
     steps:
     - name: Checkout code
@@ -30,3 +30,28 @@ jobs:
         OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       run: |
         python trainer.py
+    
+    - name: Upload results to HuggingFace
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        # Results are already uploaded by trainer.py
+    
+    - name: Deploy Streamlit to HuggingFace Spaces
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        # Clone space
+        git clone https://$HF_TOKEN@huggingface.co/spaces/P2SAMAPA/p2-llm-etf-ensemble-space
+        cd p2-llm-etf-ensemble-space
+        
+        # Copy files
+        cp ../streamlit_app.py .
+        cp ../requirements.txt .
+        
+        # Commit and push
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name "github-actions[bot]"
+        git add streamlit_app.py requirements.txt
+        git commit -m "Update from GitHub Actions - $(date '+%Y-%m-%d %H:%M')" || true
+        git push
