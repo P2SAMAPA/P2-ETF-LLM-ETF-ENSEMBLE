@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses OpenRouter (API key) + Ollama (local or remote with key).
+Queries LLMs from multiple providers and aggregates their picks.
 """
 
 import os
@@ -70,8 +70,12 @@ Return ONLY the JSON, no other text. Exactly 3 selections required."""
         return selections
 
 
+# ============================================
+# OPENROUTER ANALYZER (Cloud API - requires key)
+# ============================================
+
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - using available models."""
+    """OpenRouter API - requires OPENROUTER_API_KEY."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
@@ -200,52 +204,43 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         }
 
 
+# ============================================
+# OLLAMA ANALYZER (Local - no key required)
+# ============================================
+
 class OllamaAnalyzer(LLMAnalyzer):
-    """Ollama API - works with local or remote/cloud Ollama."""
+    """Ollama API - completely free, runs locally."""
     
     def __init__(self, config: Dict):
         super().__init__(config)
-        
-        # Ollama configuration
-        self.api_key = os.environ.get("OLLAMA_API_KEY") or config.get("OLLAMA_API_KEY")
         self.base_url = os.environ.get("OLLAMA_URL") or config.get("OLLAMA_URL", "http://localhost:11434")
         
-        # Models to try
+        # Models to try (including NVIDIA Nemotron via Ollama)
         self.models = [
             "llama3.2:3b",
             "phi3:mini", 
             "mistral:7b",
-            "llama3.1:8b",
+            "nemotron-3-nano:4b",      # NVIDIA Nemotron via Ollama
+            "nemotron-3-nano:30b",     # NVIDIA Nemotron (larger)
         ]
-        
-        # If using cloud/remote Ollama, we need the endpoint
-        self.is_remote = self.api_key is not None
         
         self.available_models = []
         self._check_availability()
     
     def _check_availability(self):
-        """Check if Ollama is running (local or remote)."""
+        """Check if Ollama is running and which models are available."""
         try:
-            if self.is_remote:
-                # Remote Ollama with API key
-                headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-                response = requests.get(f"{self.base_url}/api/tags", headers=headers, timeout=5)
-            else:
-                # Local Ollama
-                response = requests.get(f"{self.base_url}/api/tags", timeout=2)
-            
+            response = requests.get(f"{self.base_url}/api/tags", timeout=2)
             if response.status_code == 200:
                 data = response.json()
                 available = [m["name"] for m in data.get("models", [])]
                 self.available_models = [m for m in self.models if m in available]
                 if self.available_models:
-                    location = "remote" if self.is_remote else "local"
-                    logger.info(f"✅ Ollama ({location}) available with models: {self.available_models}")
+                    logger.info(f"✅ Ollama available with models: {self.available_models}")
                 else:
                     logger.warning(f"⚠️ No Ollama models found. Available: {available}")
             else:
-                logger.warning(f"⚠️ Ollama not available: {response.status_code}")
+                logger.warning("⚠️ Ollama not running")
         except Exception as e:
             logger.warning(f"⚠️ Ollama not available: {str(e)[:50]}")
     
@@ -281,13 +276,8 @@ class OllamaAnalyzer(LLMAnalyzer):
         return self._aggregate_results(results, successful_models)
     
     def _call_api(self, model: str, prompt: str) -> str:
-        """Call Ollama API (local or remote)."""
+        """Call Ollama API."""
         url = f"{self.base_url}/api/generate"
-        
-        headers = {}
-        if self.is_remote and self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        
         data = {
             "model": model,
             "prompt": prompt,
@@ -296,7 +286,7 @@ class OllamaAnalyzer(LLMAnalyzer):
             "max_tokens": 500,
         }
         
-        response = requests.post(url, json=data, headers=headers, timeout=60)
+        response = requests.post(url, json=data, timeout=60)
         response.raise_for_status()
         return response.json()["response"]
     
@@ -369,6 +359,10 @@ class OllamaAnalyzer(LLMAnalyzer):
         }
 
 
+# ============================================
+# ENSEMBLE ANALYZER (Combines all providers)
+# ============================================
+
 class EnsembleAnalyzer:
     """Combine all LLM analyzers into one ensemble."""
     
@@ -376,7 +370,7 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # OpenRouter (with API key)
+        # 1. OpenRouter (cloud - requires API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
@@ -384,7 +378,7 @@ class EnsembleAnalyzer:
         else:
             logger.warning("⚠️ OPENROUTER_API_KEY not set - skipping OpenRouter")
         
-        # Ollama (local or remote)
+        # 2. Ollama (local - no key required)
         ollama = OllamaAnalyzer(config)
         if ollama.available_models:
             self.analyzers.append(ollama)
