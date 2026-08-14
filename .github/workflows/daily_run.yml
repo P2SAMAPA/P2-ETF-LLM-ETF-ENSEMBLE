@@ -1,0 +1,32 @@
+name: LLM ETF Ensemble Daily Run
+
+on:
+  schedule:
+    - cron: '30 0 * * 1-6'  # 00:30 UTC, Monday-Saturday
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  run-ensemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # LLM API calls should be fast
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run LLM ETF Ensemble
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      run: |
+        python trainer.py
