@@ -51,42 +51,28 @@ st.markdown("""
     .confidence-low { color: #e74c3c; font-weight: 600; }
     .llm-tag {
         display: inline-block;
-        background: #667eea;
         color: white;
         padding: 2px 8px;
         border-radius: 12px;
-        font-size: 0.7rem;
+        font-size: 0.65rem;
         margin: 2px;
+        white-space: nowrap;
     }
-    .llm-tag-ollama {
-        background: #764ba2;
-    }
-    .llm-tag-openai {
-        background: #10a37f;
-    }
-    .llm-tag-anthropic {
-        background: #d97757;
-    }
-    .llm-tag-meta {
-        background: #3168e0;
-    }
-    .llm-tag-mistral {
-        background: #f7b731;
-        color: #1a1a1a;
-    }
-    .llm-tag-other {
-        background: #6c757d;
-    }
-    .sidebar-llm-section {
-        background: #f8f9fa;
-        border-radius: 10px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-    }
-    .sidebar-llm-section h4 {
-        margin: 0 0 0.5rem 0;
-        color: #2c3e50;
-        font-size: 0.9rem;
+    .llm-tag-openai { background: #10a37f; }
+    .llm-tag-anthropic { background: #d97757; }
+    .llm-tag-meta { background: #3168e0; }
+    .llm-tag-mistral { background: #f7b731; color: #1a1a1a; }
+    .llm-tag-ollama { background: #764ba2; }
+    .llm-tag-google { background: #4285f4; }
+    .llm-tag-deepseek { background: #1e293b; }
+    .llm-tag-qwen { background: #d32f2f; }
+    .llm-tag-other { background: #6c757d; }
+    .provider-group {
+        background: white;
+        border-radius: 6px;
+        padding: 0.5rem;
+        margin: 0.3rem 0;
+        border-left: 3px solid #667eea;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -94,6 +80,8 @@ st.markdown("""
 
 def get_llm_provider(model_name):
     """Get the provider of an LLM model."""
+    if not model_name:
+        return 'Unknown'
     model_name = model_name.lower()
     if 'openai' in model_name or 'gpt' in model_name:
         return 'OpenAI'
@@ -120,18 +108,28 @@ def get_llm_provider(model_name):
 def get_llm_color(model_name):
     """Get color class for an LLM model."""
     provider = get_llm_provider(model_name)
-    if provider == 'OpenAI':
-        return 'llm-tag-openai'
-    elif provider == 'Anthropic':
-        return 'llm-tag-anthropic'
-    elif provider == 'Meta':
-        return 'llm-tag-meta'
-    elif provider == 'Mistral':
-        return 'llm-tag-mistral'
-    elif provider == 'Ollama':
-        return 'llm-tag-ollama'
-    else:
-        return 'llm-tag-other'
+    color_map = {
+        'OpenAI': 'llm-tag-openai',
+        'Anthropic': 'llm-tag-anthropic',
+        'Meta': 'llm-tag-meta',
+        'Mistral': 'llm-tag-mistral',
+        'Ollama': 'llm-tag-ollama',
+        'Google': 'llm-tag-google',
+        'DeepSeek': 'llm-tag-deepseek',
+        'Qwen': 'llm-tag-qwen',
+        'Other': 'llm-tag-other',
+        'Unknown': 'llm-tag-other'
+    }
+    return color_map.get(provider, 'llm-tag-other')
+
+
+def get_short_model_name(model_name):
+    """Get short display name for a model."""
+    if not model_name:
+        return 'unknown'
+    if '/' in model_name:
+        return model_name.split('/')[-1][:15]
+    return model_name[:15]
 
 
 def load_from_huggingface():
@@ -139,7 +137,6 @@ def load_from_huggingface():
     try:
         repo_id = "P2SAMAPA/p2-llm-etf-ensemble-results"
         
-        # Try common filename patterns
         today = datetime.now().strftime('%Y-%m-%d')
         yesterday = (datetime.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
         
@@ -211,7 +208,7 @@ def create_probability_chart(selections):
         textposition='outside',
         marker_color=['#27ae60' if r > 1.0 else '#f39c12' if r > 0.5 else '#e74c3c' 
                       for r in df['expected_return']],
-        hovertemplate='<b>%{y}</b><br>Expected Return: %{x:.1f}%<br>Confidence: %{customdata}<extra></extra>',
+        hovertemplate='<b>%{y}</b><br>Expected Return: %{x:.1f}%<br>Confidence: %{customdata}<br>Votes: %{text}<extra></extra>',
         customdata=df['confidence']
     ))
     
@@ -228,6 +225,63 @@ def create_probability_chart(selections):
     return fig
 
 
+def get_all_models_from_data(data):
+    """Extract all unique models from the data."""
+    all_models = set()
+    
+    for universe_name, universe_data in data.get('universes', {}).items():
+        for pick in universe_data.get('top_picks', []):
+            models = pick.get('models', [])
+            if isinstance(models, list):
+                for m in models:
+                    if m and m != 'unknown':
+                        all_models.add(m)
+        
+        stats = universe_data.get('ensemble_stats', {})
+        models_used = stats.get('models_used', [])
+        if isinstance(models_used, list):
+            for m in models_used:
+                if m and m != 'unknown':
+                    all_models.add(m)
+    
+    return sorted(list(all_models))
+
+
+def display_llm_sidebar(all_models):
+    """Display LLM models in the sidebar with provider grouping."""
+    if not all_models:
+        st.markdown("### 🤖 LLMs Used")
+        st.info("No LLM data available in the results")
+        return
+    
+    providers = {}
+    for model in all_models:
+        provider = get_llm_provider(model)
+        if provider not in providers:
+            providers[provider] = []
+        providers[provider].append(model)
+    
+    st.markdown("### 🤖 LLMs Used")
+    st.markdown(f"**Total Models:** {len(all_models)}")
+    
+    for provider, models in sorted(providers.items()):
+        st.markdown(f"""
+        <div class="provider-group">
+            <div style="font-weight:600; font-size:0.8rem; color:#2c3e50; margin-bottom:4px;">{provider} ({len(models)})</div>
+            <div style="display:flex; flex-wrap:wrap; gap:3px;">
+        """, unsafe_allow_html=True)
+        
+        for model in models[:15]:
+            short_name = get_short_model_name(model)
+            color_class = get_llm_color(model)
+            st.markdown(f'<span class="llm-tag {color_class}">{short_name}</span>', unsafe_allow_html=True)
+        
+        if len(models) > 15:
+            st.markdown(f'<span class="llm-tag llm-tag-other">+{len(models)-15} more</span>', unsafe_allow_html=True)
+        
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+
 def display_universe(universe_data, universe_name):
     """Display a single universe's results."""
     top_picks = universe_data.get('top_picks', [])
@@ -235,27 +289,25 @@ def display_universe(universe_data, universe_name):
         st.warning(f"No recommendations available for {universe_name}")
         return
     
-    # Display as cards
     cols = st.columns(min(len(top_picks), 3))
     for idx, pick in enumerate(top_picks):
         col = cols[idx % len(cols)]
         with col:
             confidence_class = get_confidence_color(pick.get('confidence'))
             
-            # Get model names
-            models = pick.get('models', ['unknown'])
-            if isinstance(models, list):
+            models = pick.get('models', [])
+            if isinstance(models, list) and models:
                 model_tags = []
                 for m in models[:5]:
-                    provider = get_llm_provider(m)
-                    short_name = m.split('/')[-1][:12] if '/' in m else m[:12]
-                    color_class = get_llm_color(m)
-                    model_tags.append(f'<span class="llm-tag {color_class}">{short_name}</span>')
+                    if m and m != 'unknown':
+                        short_name = get_short_model_name(m)
+                        color_class = get_llm_color(m)
+                        model_tags.append(f'<span class="llm-tag {color_class}">{short_name}</span>')
                 model_html = ' '.join(model_tags)
                 if len(models) > 5:
                     model_html += f' <span class="llm-tag llm-tag-other">+{len(models)-5} more</span>'
             else:
-                model_html = f'<span class="llm-tag llm-tag-other">{str(models)[:20]}</span>'
+                model_html = '<span class="llm-tag llm-tag-other">No model data</span>'
             
             st.markdown(f"""
             <div class="ticker-card">
@@ -266,10 +318,13 @@ def display_universe(universe_data, universe_name):
                 <div class="{confidence_class}" style="font-size:1.1rem;">
                     Confidence: {pick.get('confidence', 'Medium')}
                 </div>
-                <div style="font-size:0.8rem; color:#666; margin-top:0.5rem;">
-                    Votes: {pick.get('votes', 0)}
+                <div style="font-size:0.9rem; color:#666; margin-top:0.3rem;">
+                    🗳️ {pick.get('votes', 0)} model(s) selected this ETF
                 </div>
-                <div style="margin-top:0.5rem;">
+                <div style="margin-top:0.3rem; font-size:0.7rem; color:#888;">
+                    Models that voted:
+                </div>
+                <div style="margin-top:0.3rem;">
                     {model_html}
                 </div>
                 <div style="font-size:0.85rem; margin-top:0.5rem; color:#444; background:white; padding:0.5rem; border-radius:5px;">
@@ -278,12 +333,10 @@ def display_universe(universe_data, universe_name):
             </div>
             """, unsafe_allow_html=True)
     
-    # Chart
     fig = create_probability_chart(top_picks)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     
-    # Show ensemble stats
     stats = universe_data.get('ensemble_stats', {})
     if stats:
         with st.expander("📊 Ensemble Details"):
@@ -296,7 +349,6 @@ def display_universe(universe_data, universe_name):
                 models_used = stats.get('models_used', [])
                 st.metric("Models Used", len(models_used) if models_used else 0)
             
-            # Show vote distribution
             ticker_votes = stats.get('ticker_votes', {})
             if ticker_votes:
                 df_votes = pd.DataFrame([
@@ -317,74 +369,10 @@ def display_universe(universe_data, universe_name):
                 st.plotly_chart(fig_votes, use_container_width=True)
 
 
-def get_all_models_from_data(data):
-    """Extract all unique models from the data."""
-    all_models = set()
-    for universe_data in data.get('universes', {}).values():
-        for pick in universe_data.get('top_picks', []):
-            models = pick.get('models', [])
-            if isinstance(models, list):
-                for m in models:
-                    if m and m != 'unknown':
-                        all_models.add(m)
-            elif models and models != 'unknown':
-                all_models.add(str(models))
-    return sorted(list(all_models))
-
-
-def display_llm_sidebar(all_models):
-    """Display LLM models in the sidebar with provider grouping."""
-    if not all_models:
-        st.markdown("### 🤖 LLMs Used")
-        st.info("No LLM data available")
-        return
-    
-    # Group by provider
-    providers = {}
-    for model in all_models:
-        provider = get_llm_provider(model)
-        if provider not in providers:
-            providers[provider] = []
-        short_name = model.split('/')[-1] if '/' in model else model
-        providers[provider].append(short_name)
-    
-    st.markdown("### 🤖 LLMs Used")
-    st.markdown(f"**Total Models:** {len(all_models)}")
-    
-    # Display by provider
-    for provider, models in sorted(providers.items()):
-        color_class = 'llm-tag-other'
-        if provider == 'OpenAI':
-            color_class = 'llm-tag-openai'
-        elif provider == 'Anthropic':
-            color_class = 'llm-tag-anthropic'
-        elif provider == 'Meta':
-            color_class = 'llm-tag-meta'
-        elif provider == 'Mistral':
-            color_class = 'llm-tag-mistral'
-        elif provider == 'Ollama':
-            color_class = 'llm-tag-ollama'
-        
-        st.markdown(f"""
-        <div style="background: #f8f9fa; border-radius: 8px; padding: 0.5rem; margin: 0.3rem 0;">
-            <div style="font-weight:600; font-size:0.85rem; color:#2c3e50;">{provider}</div>
-            <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">
-        """, unsafe_allow_html=True)
-        
-        for model in models[:10]:
-            st.markdown(f'<span class="llm-tag {color_class}">{model}</span>', unsafe_allow_html=True)
-        
-        if len(models) > 10:
-            st.markdown(f'<span class="llm-tag llm-tag-other">+{len(models)-10} more</span>', unsafe_allow_html=True)
-        
-        st.markdown("</div></div>", unsafe_allow_html=True)
-
-
 def main():
     st.markdown('<div class="main-header">🤖 P2-LLM-ETF-ENSEMBLE</div>', unsafe_allow_html=True)
     st.markdown("*AI-Powered ETF Selection via Ensemble Voting*")
     
-    # Load data
     data, source = load_data()
     
     if not data:
@@ -407,10 +395,8 @@ python trainer.py
             st.rerun()
         return
     
-    # Extract all models from data
     all_models = get_all_models_from_data(data)
     
-    # Sidebar
     with st.sidebar:
         st.markdown("## 📊 Dashboard")
         
@@ -423,19 +409,14 @@ python trainer.py
         
         st.markdown("---")
         
-        # Stats
         total_picks = sum(len(u.get('top_picks', [])) for u in data.get('universes', {}).values())
         st.metric("Total Top Picks", total_picks)
         st.metric("Unique Models", len(all_models))
         
         st.markdown("---")
-        
-        # LLM Models Section
         display_llm_sidebar(all_models)
         
         st.markdown("---")
-        
-        # Show data source
         st.caption(f"📊 Source: {source}")
         run_date = data.get('run_date', 'Unknown')
         st.caption(f"📅 Date: {run_date}")
@@ -443,7 +424,6 @@ python trainer.py
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
     
-    # Main content
     if selected_universe == "All Universes":
         for universe_name, universe_data in data.get('universes', {}).items():
             st.markdown(f"## {universe_name}")
@@ -454,7 +434,6 @@ python trainer.py
         st.markdown(f"## {selected_universe}")
         display_universe(universe_data, selected_universe)
     
-    # Cross-universe summary
     st.markdown("## 🌟 Cross-Universe Top Picks")
     top_cross = data.get('ensemble_summary', {}).get('top_cross_universe_picks', [])
     if top_cross:
@@ -476,7 +455,6 @@ python trainer.py
     else:
         st.info("No cross-universe picks available")
     
-    # Footer
     st.markdown("---")
     st.caption(f"Data as of {run_date} | Powered by Ensemble LLM Analysis | Auto-updates daily")
 
