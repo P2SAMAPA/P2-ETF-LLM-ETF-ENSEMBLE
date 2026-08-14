@@ -11,6 +11,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, Optional
+from huggingface_hub import HfApi, create_repo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,10 +26,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def ensure_repo_exists(token: str) -> bool:
+    """Ensure the results repository exists on HuggingFace."""
+    try:
+        api = HfApi(token=token)
+        try:
+            repo_info = api.repo_info(
+                repo_id=config.RESULTS_REPO,
+                repo_type="dataset"
+            )
+            logger.info(f"✅ Repository {config.RESULTS_REPO} exists")
+            return True
+        except Exception as e:
+            logger.info(f"📦 Creating repository {config.RESULTS_REPO}...")
+            api.create_repo(
+                repo_id=config.RESULTS_REPO,
+                repo_type="dataset",
+                private=False,
+                exist_ok=True
+            )
+            logger.info(f"✅ Repository created")
+            return True
+    except Exception as e:
+        logger.warning(f"Could not check/create repo: {e}")
+        return False
+
+
 def run_trainer() -> Dict:
     """Main LLM ETF Ensemble orchestrator."""
     
     logger.info("🤖 Starting LLM ETF Ensemble Analysis...")
+    
+    # Check for API keys
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_key:
+        logger.error("❌ OPENROUTER_API_KEY not set. Please set it in environment variables.")
+        return {}
+    
+    # Ensure HF repo exists
+    hf_token = os.environ.get("HF_TOKEN") or config.HF_TOKEN
+    if hf_token:
+        ensure_repo_exists(hf_token)
+    else:
+        logger.warning("⚠️ HF_TOKEN not set - will not upload results")
     
     run_date = datetime.now().strftime("%Y-%m-%d")
     
@@ -42,17 +82,36 @@ def run_trainer() -> Dict:
     results = {
         "run_date": run_date,
         "universes": {},
-        "ensemble_summary": {}
+        "ensemble_summary": {},
+        "models_used": []  # Track all models used
     }
+
+    all_models_used = set()
 
     # Analyze each universe
     for universe_name, tickers in config.UNIVERSES.items():
         logger.info(f"\n📊 Analyzing {universe_name} with {len(tickers)} ETFs...")
         
-        # Get LLM recommendations - NO DATA NEEDED
+        # Get LLM recommendations
         result = analyzer.analyze_universe(universe_name, tickers)
         
         if result.get("selections"):
+            # Extract models used from this universe
+            for pick in result.get("selections", []):
+                models = pick.get("models", [])
+                if isinstance(models, list):
+                    all_models_used.update(models)
+                elif models:
+                    all_models_used.add(str(models))
+            
+            # Also get models from ensemble_stats
+            stats = result.get("ensemble_stats", {})
+            models_used = stats.get("models_used", [])
+            if isinstance(models_used, list):
+                all_models_used.update(models_used)
+            elif models_used:
+                all_models_used.add(str(models_used))
+            
             results["universes"][universe_name] = {
                 "top_picks": result["selections"],
                 "ensemble_stats": result.get("ensemble_stats", {}),
@@ -68,6 +127,10 @@ def run_trainer() -> Dict:
                 "error": "No recommendations from LLMs"
             }
 
+    # Update global models used
+    results["models_used"] = sorted(list(all_models_used))
+    logger.info(f"✅ All models used: {len(all_models_used)} models")
+
     # Generate ensemble summary
     all_picks = {}
     for universe, data in results["universes"].items():
@@ -79,7 +142,8 @@ def run_trainer() -> Dict:
                     "universe": universe,
                     "expected_return": pick["expected_return"],
                     "confidence": pick["confidence"],
-                    "votes": pick.get("votes", 0)
+                    "votes": pick.get("votes", 0),
+                    "models": pick.get("models", [])
                 }
     
     results["ensemble_summary"] = {
@@ -101,21 +165,22 @@ def run_trainer() -> Dict:
     logger.info(f"   Saved: {output_path}")
 
     # Upload to HuggingFace
-    if config.HF_TOKEN:
+    if hf_token:
         logger.info("\n📤 Uploading results to HuggingFace...")
         try:
-            from huggingface_hub import HfApi
-            api = HfApi(token=config.HF_TOKEN)
+            api = HfApi(token=hf_token)
             api.upload_file(
                 path_or_fileobj=output_path,
                 path_in_repo=output_path,
                 repo_id=config.RESULTS_REPO,
-                token=config.HF_TOKEN,
+                token=hf_token,
                 repo_type="dataset"
             )
             logger.info("   ✅ Upload complete!")
         except Exception as e:
             logger.error(f"   Upload failed: {e}")
+    else:
+        logger.warning("   ⚠️ Skipping upload (HF_TOKEN not set)")
 
     return results
 
