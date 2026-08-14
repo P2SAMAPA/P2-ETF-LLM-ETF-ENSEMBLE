@@ -57,10 +57,28 @@ def run_trainer() -> Dict:
     
     logger.info("🤖 Starting LLM ETF Ensemble Analysis...")
     
-    # Check for API keys
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-    if not openrouter_key:
-        logger.error("❌ OPENROUTER_API_KEY not set. Please set it in environment variables.")
+    # Debug: Log environment variables (without exposing values)
+    logger.info("🔍 Checking environment variables:")
+    logger.info(f"   HF_TOKEN set: {bool(os.environ.get('HF_TOKEN'))}")
+    logger.info(f"   OLLAMA_API_KEY set: {bool(os.environ.get('OLLAMA_API_KEY'))}")
+    logger.info(f"   OPENROUTER_API_KEY set: {bool(os.environ.get('OPENROUTER_API_KEY'))}")
+    
+    # Force reload from environment
+    ollama_key = (
+        os.environ.get("OLLAMA_API_KEY") or 
+        os.environ.get("OLLAMA_KEY") or 
+        config.OLLAMA_API_KEY
+    )
+    
+    if ollama_key:
+        logger.info("✅ OLLAMA_API_KEY found")
+        # Set it in config for the analyzer to use
+        config.OLLAMA_API_KEY = ollama_key
+    else:
+        logger.error("❌ OLLAMA_API_KEY not found")
+        logger.info("   Please set OLLAMA_API_KEY in GitHub Secrets")
+        logger.info("   Secret name: OLLAMA_API_KEY")
+        logger.info("   Value: Your API key from https://ollama.com/settings/keys")
         return {}
     
     # Ensure HF repo exists
