@@ -28,21 +28,12 @@ UNIVERSES = {
     ]
 }
 
-# LLM Configuration
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+# Working OpenRouter models (verified)
 OPENROUTER_MODELS = [
-    "anthropic/claude-3.5-sonnet",
-    "google/gemini-2.0-flash-exp",
-    "meta-llama/llama-3.1-70b-instruct",
-    "mistralai/mistral-large-2407",
-]
-
-# Ollama (local)
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODELS = [
-    "llama3.2:3b",
-    "phi3:mini",
-    "mistral:7b",
+    "openai/gpt-4o-mini",           # Fast, cheap, reliable
+    "meta-llama/llama-3.1-70b-instruct",  # Good quality
+    "mistralai/mistral-7b-instruct",  # Fast
+    "google/gemini-flash-1.5",      # Google's fast model
 ]
 
 TOP_N = 3
