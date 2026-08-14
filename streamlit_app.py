@@ -64,39 +64,16 @@ def load_from_huggingface():
     try:
         repo_id = "P2SAMAPA/p2-llm-etf-ensemble-results"
         
-        # Try to get the file directly using the HuggingFace API
-        # First, try to list files using the datasets server
-        api_url = f"https://huggingface.co/api/datasets/{repo_id}"
-        response = requests.get(api_url, timeout=10)
+        # Try common filename patterns
+        today = datetime.now().strftime('%Y-%m-%d')
+        yesterday = (datetime.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
         
-        if response.status_code == 200:
-            # Get the list of files
-            files_url = f"https://huggingface.co/api/datasets/{repo_id}/resolve/main/"
-            files_response = requests.get(files_url, timeout=10)
-            
-            if files_response.status_code == 200:
-                # Parse the file list
-                try:
-                    files_data = files_response.json()
-                    if isinstance(files_data, list):
-                        json_files = [f for f in files_data if f.endswith('.json') and f.startswith('llm_etf_ensemble_')]
-                        if json_files:
-                            latest = sorted(json_files)[-1]
-                            data_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{latest}"
-                            data_response = requests.get(data_url, timeout=10)
-                            if data_response.status_code == 200:
-                                return data_response.json(), latest
-                except:
-                    pass
-            
-            # Alternative: try common filename pattern
-            for date in [datetime.now().strftime('%Y-%m-%d'), 
-                        (datetime.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')]:
-                filename = f"llm_etf_ensemble_{date}.json"
-                data_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{filename}"
-                response = requests.get(data_url, timeout=10)
-                if response.status_code == 200:
-                    return response.json(), filename
+        for date in [today, yesterday]:
+            filename = f"llm_etf_ensemble_{date}.json"
+            data_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{filename}"
+            response = requests.get(data_url, timeout=10)
+            if response.status_code == 200:
+                return response.json(), filename
         
         return None, None
     except Exception as e:
@@ -269,14 +246,98 @@ def main():
         st.info("⏳ Results are typically available by 01:00 UTC daily.")
         
         # Show instructions to run trainer
-        st.markdown("""
-        ### To generate results:
-        ```bash
-        # Install dependencies
-        pip install -r requirements.txt
+        st.markdown("### To generate results:")
+        st.code("""
+# Install dependencies
+pip install -r requirements.txt
+
+# Set your API key
+export OPENROUTER_API_KEY="your-key-here"
+
+# Run the trainer
+python trainer.py
+        """, language="bash")
         
-        # Set your API key
-        export OPENROUTER_API_KEY="your-key-here"
+        if st.button("🔄 Retry", use_container_width=True):
+            st.rerun()
+        return
+    
+    # Show data source
+    st.caption(f"📊 Data source: **{source}**")
+    
+    # Show last update time
+    run_date = data.get('run_date', 'Unknown')
+    st.caption(f"📅 Results from: **{run_date}**")
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("## 📊 Dashboard")
         
-        # Run the trainer
-        python trainer.py
+        universes = list(data.get('universes', {}).keys())
+        if universes:
+            selected_universe = st.selectbox(
+                "Select Universe",
+                ["All Universes"] + universes
+            )
+        
+        st.markdown("---")
+        
+        # Stats
+        total_picks = sum(len(u.get('top_picks', [])) for u in data.get('universes', {}).values())
+        st.metric("Total Top Picks", total_picks)
+        
+        total_models = 0
+        all_models = set()
+        for u in data.get('universes', {}).values():
+            for pick in u.get('top_picks', []):
+                models = pick.get('models', [])
+                if isinstance(models, list):
+                    all_models.update(models)
+                elif models:
+                    all_models.add(str(models))
+        st.metric("Unique Models", len(all_models))
+        
+        st.markdown("---")
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+    
+    # Display content
+    if selected_universe == "All Universes":
+        for universe_name, universe_data in data.get('universes', {}).items():
+            st.markdown(f"## {universe_name}")
+            display_universe(universe_data, universe_name)
+            st.markdown("---")
+    else:
+        universe_data = data.get('universes', {}).get(selected_universe, {})
+        st.markdown(f"## {selected_universe}")
+        display_universe(universe_data, selected_universe)
+    
+    # Cross-universe summary
+    st.markdown("## 🌟 Cross-Universe Top Picks")
+    top_cross = data.get('ensemble_summary', {}).get('top_cross_universe_picks', [])
+    if top_cross:
+        df_cross = pd.DataFrame(top_cross)
+        if 'expected_return' in df_cross.columns:
+            df_cross['expected_return'] = df_cross['expected_return'].apply(lambda x: f"{x:.1f}%")
+        st.dataframe(
+            df_cross,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'ticker': 'Ticker',
+                'universe': 'Universe',
+                'expected_return': 'Expected Return',
+                'confidence': 'Confidence',
+                'votes': 'Votes'
+            }
+        )
+    else:
+        st.info("No cross-universe picks available")
+    
+    # Footer
+    st.markdown("---")
+    st.caption(f"Data as of {run_date} | Powered by Ensemble LLM Analysis | Auto-updates daily")
+
+
+if __name__ == "__main__":
+    main()
