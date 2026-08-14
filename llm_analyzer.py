@@ -26,38 +26,34 @@ class LLMAnalyzer:
         self.top_n = config.get("TOP_N", 3)
         
     def build_prompt(self, universe_name: str, tickers: List[str]) -> str:
-        """Build the prompt for LLM analysis."""
+        """Build the prompt for LLM analysis - forces 3 picks."""
         
-        # Create a strong prompt that forces 3 picks
         ticker_list = ', '.join(tickers)
         
-        prompt = f"""You are a professional financial analyst.
+        prompt = f"""Analyze these ETFs and return the top {self.top_n} performers for tomorrow.
 
 UNIVERSE: {universe_name}
 TICKERS: {ticker_list}
 
-TASK: Select EXACTLY {self.top_n} ETFs that will perform best tomorrow.
+Return JSON with EXACTLY {self.top_n} selections. Each selection must have ticker, expected_return (%), confidence (High/Medium/Low), and rationale.
 
-RULES:
-- You MUST return EXACTLY {self.top_n} ETFs
-- Each ETF must have a ticker, expected return %, confidence, and rationale
-- Return ONLY valid JSON
-
-EXAMPLE FORMAT:
+EXAMPLE (must follow this EXACT format):
 {{
     "selections": [
-        {{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand."}},
-        {{"ticker": "XLE", "expected_return": 1.2, "confidence": "Medium", "rationale": "Oil prices rising."}},
-        {{"ticker": "XLK", "expected_return": 0.9, "confidence": "Medium", "rationale": "Tech earnings strong."}}
+        {{"ticker": "GDX", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand"}},
+        {{"ticker": "XLE", "expected_return": 1.2, "confidence": "Medium", "rationale": "Oil price recovery"}},
+        {{"ticker": "XLK", "expected_return": 0.9, "confidence": "Medium", "rationale": "Tech earnings"}}
     ]
 }}
 
-Now return your analysis for {universe_name} with EXACTLY {self.top_n} selections. JSON only, no other text.
+Now return your {self.top_n} picks for {universe_name}. JSON only. MUST HAVE {self.top_n} selections. Do not return fewer or more.
 """
         return prompt
     
     def parse_response(self, response_text: str) -> List[Dict]:
-        """Parse LLM response into structured selections."""
+        """Parse LLM response into structured selections - ensures exactly top_n picks."""
+        selections = []
+        
         try:
             # Try to find JSON
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
@@ -73,7 +69,6 @@ Now return your analysis for {universe_name} with EXACTLY {self.top_n} selection
             pass
         
         # Fallback: try to parse individual ticker lines
-        selections = []
         lines = response_text.strip().split('\n')
         ticker_pattern = re.compile(r'([A-Z]{1,5})\s*[:|]\s*([0-9.]+)%?\s*(?:High|Medium|Low)?', re.IGNORECASE)
         
@@ -85,35 +80,51 @@ Now return your analysis for {universe_name} with EXACTLY {self.top_n} selection
                     ret = float(match.group(2))
                 except:
                     ret = 0.5
+                
+                # Extract confidence
+                conf = "Medium"
+                if "High" in line:
+                    conf = "High"
+                elif "Low" in line:
+                    conf = "Low"
+                
                 selections.append({
                     "ticker": ticker,
                     "expected_return": ret,
-                    "confidence": "Medium",
+                    "confidence": conf,
                     "rationale": line.strip()
                 })
                 if len(selections) >= self.top_n:
                     break
         
+        # If still no selections, pick top 3 from the universe based on ticker order
+        if not selections:
+            tickers = [t for t in response_text.upper().split() if len(t) <= 5 and t.isalpha()]
+            for ticker in tickers[:self.top_n]:
+                selections.append({
+                    "ticker": ticker,
+                    "expected_return": 0.5,
+                    "confidence": "Medium",
+                    "rationale": "Default selection from LLM response"
+                })
+        
         return selections[:self.top_n]
 
 
 class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API implementation - queries ALL available models."""
+    """OpenRouter API implementation."""
     
     def __init__(self, config: Dict, api_key: str):
         super().__init__(config)
         self.api_key = api_key
         self.models = [
-            "openai/gpt-4o",
             "openai/gpt-4o-mini",
-            "openai/gpt-4-turbo",
             "openai/gpt-3.5-turbo",
             "anthropic/claude-3-haiku",
-            "meta-llama/llama-3.1-70b-instruct",
             "meta-llama/llama-3.1-8b-instruct",
-            "mistralai/mistral-large-2407",
             "deepseek/deepseek-chat",
             "qwen/qwen-2.5-72b-instruct",
+            "mistralai/mistral-large-2407",
         ]
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
     
@@ -128,7 +139,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {}
             for model in self.models:
-                future = executor.submit(self._call_api_safe, model, prompt)
+                future = executor.submit(self._call_api_safe, model, prompt, universe_name)
                 futures[future] = model
             
             completed = 0
@@ -140,7 +151,6 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     if response:
                         selections = self.parse_response(response)
                         if selections:
-                            # Ensure each selection has a model tag
                             for sel in selections:
                                 sel["model"] = model
                             results.extend(selections)
@@ -160,7 +170,7 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         
         return self._aggregate_results(results, successful_models)
     
-    def _call_api_safe(self, model: str, prompt: str) -> Optional[str]:
+    def _call_api_safe(self, model: str, prompt: str, universe_name: str) -> Optional[str]:
         """Call OpenRouter API with retries."""
         max_retries = 2
         for attempt in range(max_retries):
@@ -170,7 +180,8 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:
-                    raise
+                    logger.warning(f"  {model} failed after {max_retries} attempts: {str(e)[:50]}")
+                    return None
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call OpenRouter API."""
@@ -184,11 +195,11 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         data = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a professional financial analyst. Always respond with valid JSON only."},
+                {"role": "system", "content": "You are a financial analyst. Always respond with valid JSON containing EXACTLY 3 selections."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 800,
+            "max_tokens": 600,
         }
         
         response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
@@ -200,10 +211,8 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         if not results:
             return {"selections": [], "consensus": {}}
         
-        # Count votes per ticker
         ticker_votes = {}
         ticker_data = {}
-        total_selections = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
@@ -212,7 +221,6 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             if not ticker:
                 continue
                 
-            # Initialize
             if ticker not in ticker_votes:
                 ticker_votes[ticker] = 0
                 ticker_data[ticker] = {
@@ -222,24 +230,20 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     "models": []
                 }
             
-            # Each selection is 1 vote
             ticker_votes[ticker] += 1
             ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
             ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
             ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
             
-            # Track unique models
             if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
                 ticker_data[ticker]["models"].append(model)
         
-        # Sort by votes (descending), then by avg return
         sorted_tickers = sorted(
             ticker_votes.items(),
             key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
             reverse=True
         )
         
-        # Take top N
         top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
         
         selections = []
@@ -247,7 +251,6 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             data = ticker_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
             
-            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
@@ -258,14 +261,14 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                 "expected_return": round(avg_return, 2),
                 "confidence": top_conf,
                 "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],  # Total selections for this ticker
-                "models": data["models"]  # Unique models that picked this ticker
+                "votes": ticker_votes[ticker],
+                "models": data["models"]
             })
         
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": total_selections,
+                "total_votes": len(results),
                 "ticker_votes": ticker_votes,
                 "models_used": list(set(successful_models))
             }
@@ -296,6 +299,7 @@ class OllamaAnalyzer(LLMAnalyzer):
                     logger.info(f"✅ Ollama available with models: {self.models}")
                 else:
                     logger.warning("⚠️ No Ollama models available")
+                    self.models = []
             else:
                 self.models = []
         except:
@@ -344,7 +348,7 @@ class OllamaAnalyzer(LLMAnalyzer):
             "prompt": prompt,
             "stream": False,
             "temperature": 0.3,
-            "max_tokens": 800,
+            "max_tokens": 600,
         }
         
         response = requests.post(url, json=data, timeout=60)
@@ -358,7 +362,6 @@ class OllamaAnalyzer(LLMAnalyzer):
         
         ticker_votes = {}
         ticker_data = {}
-        total_selections = len(results)
         
         for r in results:
             ticker = r.get("ticker", "").upper()
@@ -413,7 +416,7 @@ class OllamaAnalyzer(LLMAnalyzer):
         return {
             "selections": selections,
             "consensus": {
-                "total_votes": total_selections,
+                "total_votes": len(results),
                 "ticker_votes": ticker_votes,
                 "models_used": list(set(successful_models))
             }
@@ -427,7 +430,6 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        # OpenRouter (with API key)
         openrouter_key = os.environ.get("OPENROUTER_API_KEY")
         if openrouter_key:
             self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
@@ -435,7 +437,6 @@ class EnsembleAnalyzer:
         else:
             logger.warning("⚠️ OPENROUTER_API_KEY not set")
         
-        # Ollama (local)
         ollama = OllamaAnalyzer(config)
         if ollama.models:
             self.analyzers.append(ollama)
@@ -471,13 +472,11 @@ class EnsembleAnalyzer:
         if not results:
             return {"selections": [], "ensemble_stats": {}}
         
-        # Aggregate all votes across all analyzers
         all_votes = {}
         all_data = {}
         all_models = set()
         
         for result in results:
-            # Get selections from this analyzer
             for sel in result.get("selections", []):
                 ticker = sel.get("ticker", "").upper()
                 if ticker:
@@ -493,7 +492,6 @@ class EnsembleAnalyzer:
                     all_data[ticker]["confidences"].append(sel.get("confidence", "Medium"))
                     all_data[ticker]["rationales"].append(sel.get("rationale", ""))
                     
-                    # Collect models for this ticker
                     models = sel.get("models", [])
                     if isinstance(models, list):
                         for m in models:
@@ -501,19 +499,16 @@ class EnsembleAnalyzer:
                                 all_data[ticker]["models"].append(m)
                         all_models.update(models)
             
-            # Also collect models from consensus
             consensus_models = result.get("consensus", {}).get("models_used", [])
             if isinstance(consensus_models, list):
                 all_models.update(consensus_models)
         
-        # Sort by votes (descending), then by average return
         sorted_votes = sorted(
             all_votes.items(),
             key=lambda x: (x[1], sum(all_data[x[0]]["returns"]) / len(all_data[x[0]]["returns"])),
             reverse=True
         )
         
-        # Take top N
         top_tickers = [t for t, _ in sorted_votes[:self.config.get("TOP_N", 3)]]
         
         selections = []
@@ -521,7 +516,6 @@ class EnsembleAnalyzer:
             data = all_data[ticker]
             avg_return = sum(data["returns"]) / len(data["returns"])
             
-            # Most common confidence
             conf_counts = {}
             for c in data["confidences"]:
                 conf_counts[c] = conf_counts.get(c, 0) + 1
