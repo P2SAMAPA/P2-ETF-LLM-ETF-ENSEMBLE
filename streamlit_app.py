@@ -49,14 +49,89 @@ st.markdown("""
     .confidence-high { color: #27ae60; font-weight: 600; }
     .confidence-medium { color: #f39c12; font-weight: 600; }
     .confidence-low { color: #e74c3c; font-weight: 600; }
-    .stMetric {
-        background: white;
+    .llm-tag {
+        display: inline-block;
+        background: #667eea;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        margin: 2px;
+    }
+    .llm-tag-ollama {
+        background: #764ba2;
+    }
+    .llm-tag-openai {
+        background: #10a37f;
+    }
+    .llm-tag-anthropic {
+        background: #d97757;
+    }
+    .llm-tag-meta {
+        background: #3168e0;
+    }
+    .llm-tag-mistral {
+        background: #f7b731;
+        color: #1a1a1a;
+    }
+    .llm-tag-other {
+        background: #6c757d;
+    }
+    .sidebar-llm-section {
+        background: #f8f9fa;
         border-radius: 10px;
-        padding: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .sidebar-llm-section h4 {
+        margin: 0 0 0.5rem 0;
+        color: #2c3e50;
+        font-size: 0.9rem;
     }
     </style>
 """, unsafe_allow_html=True)
+
+
+def get_llm_provider(model_name):
+    """Get the provider of an LLM model."""
+    model_name = model_name.lower()
+    if 'openai' in model_name or 'gpt' in model_name:
+        return 'OpenAI'
+    elif 'anthropic' in model_name or 'claude' in model_name:
+        return 'Anthropic'
+    elif 'meta' in model_name or 'llama' in model_name:
+        return 'Meta'
+    elif 'mistral' in model_name or 'mixtral' in model_name:
+        return 'Mistral'
+    elif 'ollama' in model_name:
+        return 'Ollama'
+    elif 'google' in model_name or 'gemini' in model_name:
+        return 'Google'
+    elif 'deepseek' in model_name:
+        return 'DeepSeek'
+    elif 'qwen' in model_name:
+        return 'Qwen'
+    elif 'cohere' in model_name:
+        return 'Cohere'
+    else:
+        return 'Other'
+
+
+def get_llm_color(model_name):
+    """Get color class for an LLM model."""
+    provider = get_llm_provider(model_name)
+    if provider == 'OpenAI':
+        return 'llm-tag-openai'
+    elif provider == 'Anthropic':
+        return 'llm-tag-anthropic'
+    elif provider == 'Meta':
+        return 'llm-tag-meta'
+    elif provider == 'Mistral':
+        return 'llm-tag-mistral'
+    elif provider == 'Ollama':
+        return 'llm-tag-ollama'
+    else:
+        return 'llm-tag-other'
 
 
 def load_from_huggingface():
@@ -84,7 +159,6 @@ def load_from_huggingface():
 def load_from_local():
     """Fallback: load from local files."""
     try:
-        # Look for JSON files in the current directory
         json_files = glob.glob("llm_etf_ensemble_*.json")
         if json_files:
             latest = sorted(json_files)[-1]
@@ -98,12 +172,10 @@ def load_from_local():
 
 def load_data():
     """Load data from HuggingFace with fallback to local."""
-    # First try HuggingFace
     data, filename = load_from_huggingface()
     if data:
         return data, f"HF: {filename}"
     
-    # Fallback to local
     data, filename = load_from_local()
     if data:
         return data, f"Local: {filename}"
@@ -173,9 +245,17 @@ def display_universe(universe_data, universe_name):
             # Get model names
             models = pick.get('models', ['unknown'])
             if isinstance(models, list):
-                model_names = ', '.join([m.replace('openai/', '').replace('meta-llama/', '').replace('mistralai/', '')[:15] for m in models[:3]])
+                model_tags = []
+                for m in models[:5]:
+                    provider = get_llm_provider(m)
+                    short_name = m.split('/')[-1][:12] if '/' in m else m[:12]
+                    color_class = get_llm_color(m)
+                    model_tags.append(f'<span class="llm-tag {color_class}">{short_name}</span>')
+                model_html = ' '.join(model_tags)
+                if len(models) > 5:
+                    model_html += f' <span class="llm-tag llm-tag-other">+{len(models)-5} more</span>'
             else:
-                model_names = str(models)[:20]
+                model_html = f'<span class="llm-tag llm-tag-other">{str(models)[:20]}</span>'
             
             st.markdown(f"""
             <div class="ticker-card">
@@ -187,7 +267,10 @@ def display_universe(universe_data, universe_name):
                     Confidence: {pick.get('confidence', 'Medium')}
                 </div>
                 <div style="font-size:0.8rem; color:#666; margin-top:0.5rem;">
-                    Votes: {pick.get('votes', 0)} | Models: {model_names}
+                    Votes: {pick.get('votes', 0)}
+                </div>
+                <div style="margin-top:0.5rem;">
+                    {model_html}
                 </div>
                 <div style="font-size:0.85rem; margin-top:0.5rem; color:#444; background:white; padding:0.5rem; border-radius:5px;">
                     {pick.get('rationale', '')[:200]}
@@ -234,6 +317,69 @@ def display_universe(universe_data, universe_name):
                 st.plotly_chart(fig_votes, use_container_width=True)
 
 
+def get_all_models_from_data(data):
+    """Extract all unique models from the data."""
+    all_models = set()
+    for universe_data in data.get('universes', {}).values():
+        for pick in universe_data.get('top_picks', []):
+            models = pick.get('models', [])
+            if isinstance(models, list):
+                for m in models:
+                    if m and m != 'unknown':
+                        all_models.add(m)
+            elif models and models != 'unknown':
+                all_models.add(str(models))
+    return sorted(list(all_models))
+
+
+def display_llm_sidebar(all_models):
+    """Display LLM models in the sidebar with provider grouping."""
+    if not all_models:
+        st.markdown("### 🤖 LLMs Used")
+        st.info("No LLM data available")
+        return
+    
+    # Group by provider
+    providers = {}
+    for model in all_models:
+        provider = get_llm_provider(model)
+        if provider not in providers:
+            providers[provider] = []
+        short_name = model.split('/')[-1] if '/' in model else model
+        providers[provider].append(short_name)
+    
+    st.markdown("### 🤖 LLMs Used")
+    st.markdown(f"**Total Models:** {len(all_models)}")
+    
+    # Display by provider
+    for provider, models in sorted(providers.items()):
+        color_class = 'llm-tag-other'
+        if provider == 'OpenAI':
+            color_class = 'llm-tag-openai'
+        elif provider == 'Anthropic':
+            color_class = 'llm-tag-anthropic'
+        elif provider == 'Meta':
+            color_class = 'llm-tag-meta'
+        elif provider == 'Mistral':
+            color_class = 'llm-tag-mistral'
+        elif provider == 'Ollama':
+            color_class = 'llm-tag-ollama'
+        
+        st.markdown(f"""
+        <div style="background: #f8f9fa; border-radius: 8px; padding: 0.5rem; margin: 0.3rem 0;">
+            <div style="font-weight:600; font-size:0.85rem; color:#2c3e50;">{provider}</div>
+            <div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">
+        """, unsafe_allow_html=True)
+        
+        for model in models[:10]:
+            st.markdown(f'<span class="llm-tag {color_class}">{model}</span>', unsafe_allow_html=True)
+        
+        if len(models) > 10:
+            st.markdown(f'<span class="llm-tag llm-tag-other">+{len(models)-10} more</span>', unsafe_allow_html=True)
+        
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+
 def main():
     st.markdown('<div class="main-header">🤖 P2-LLM-ETF-ENSEMBLE</div>', unsafe_allow_html=True)
     st.markdown("*AI-Powered ETF Selection via Ensemble Voting*")
@@ -245,7 +391,6 @@ def main():
         st.error("⚠️ No data available. The daily run may not have completed yet.")
         st.info("⏳ Results are typically available by 01:00 UTC daily.")
         
-        # Show instructions to run trainer
         st.markdown("### To generate results:")
         st.code("""
 # Install dependencies
@@ -262,12 +407,8 @@ python trainer.py
             st.rerun()
         return
     
-    # Show data source
-    st.caption(f"📊 Data source: **{source}**")
-    
-    # Show last update time
-    run_date = data.get('run_date', 'Unknown')
-    st.caption(f"📅 Results from: **{run_date}**")
+    # Extract all models from data
+    all_models = get_all_models_from_data(data)
     
     # Sidebar
     with st.sidebar:
@@ -285,23 +426,24 @@ python trainer.py
         # Stats
         total_picks = sum(len(u.get('top_picks', [])) for u in data.get('universes', {}).values())
         st.metric("Total Top Picks", total_picks)
-        
-        total_models = 0
-        all_models = set()
-        for u in data.get('universes', {}).values():
-            for pick in u.get('top_picks', []):
-                models = pick.get('models', [])
-                if isinstance(models, list):
-                    all_models.update(models)
-                elif models:
-                    all_models.add(str(models))
         st.metric("Unique Models", len(all_models))
         
         st.markdown("---")
+        
+        # LLM Models Section
+        display_llm_sidebar(all_models)
+        
+        st.markdown("---")
+        
+        # Show data source
+        st.caption(f"📊 Source: {source}")
+        run_date = data.get('run_date', 'Unknown')
+        st.caption(f"📅 Date: {run_date}")
+        
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
     
-    # Display content
+    # Main content
     if selected_universe == "All Universes":
         for universe_name, universe_data in data.get('universes', {}).items():
             st.markdown(f"## {universe_name}")
