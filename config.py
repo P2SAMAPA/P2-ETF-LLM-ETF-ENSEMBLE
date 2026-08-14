@@ -32,14 +32,12 @@ UNIVERSES = {
 # LLM CONFIGURATION
 # ============================================
 
-# ---------- OpenRouter (Free models) ----------
+# ---------- OpenRouter ----------
 # Get your API key from: https://openrouter.ai/keys
-# Free models available with no payment
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# ---------- Groq (Completely free, no API key needed) ----------
-# Optional: Get a free API key from: https://console.groq.com
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+# ---------- HuggingFace Inference ----------
+# No API key required - completely free
 
 # ---------- General Settings ----------
 TOP_N = 3
@@ -60,11 +58,11 @@ def print_config():
     print("\n--- LLM Providers ---")
     
     if OPENROUTER_API_KEY:
-        print("✅ OpenRouter: Enabled (free models)")
+        print("✅ OpenRouter: Enabled")
     else:
         print("❌ OpenRouter: Disabled (no API key)")
     
-    print("✅ Groq: Enabled (free, no API key needed)")
+    print("✅ HuggingFace Inference: Enabled (free)")
     print("="*50 + "\n")
 
 
