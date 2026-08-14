@@ -2,13 +2,11 @@
 config.py  —  Configuration for LLM ETF Ensemble
 """
 
-# HuggingFace credentials
-HF_TOKEN = None  # Set via environment variable
-RESULTS_REPO = "P2SAMAPA/p2-llm-etf-ensemble-results"
+import os
 
-# Data source
-MASTER_DATA_REPO = "P2SAMAPA/fi-etf-macro-signal-master-data"
-MASTER_DATA_FILE = "master_data.parquet"
+# HuggingFace for results only
+HF_TOKEN = os.environ.get("HF_TOKEN")
+RESULTS_REPO = "P2SAMAPA/p2-llm-etf-ensemble-results"
 
 # Universes to analyze
 UNIVERSES = {
@@ -31,12 +29,10 @@ UNIVERSES = {
 }
 
 # LLM Configuration
-# OpenRouter
-OPENROUTER_API_KEY = None  # Set via environment variable
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_MODELS = [
     "anthropic/claude-3.5-sonnet",
     "google/gemini-2.0-flash-exp",
-    "microsoft/phi-3-medium-128k-instruct",
     "meta-llama/llama-3.1-70b-instruct",
     "mistralai/mistral-large-2407",
 ]
@@ -49,17 +45,4 @@ OLLAMA_MODELS = [
     "mistral:7b",
 ]
 
-# Free APIs (no key required)
-FREE_MODELS = [
-    "cohere/command-r-plus",      # Free tier
-    "deepseek/deepseek-chat",     # Free tier
-]
-
-# All models to use (in priority order)
-ALL_MODELS = OPENROUTER_MODELS + OLLAMA_MODELS + FREE_MODELS
-
-# Number of ETFs to select per universe
 TOP_N = 3
-
-# Run date
-RUN_DATE = None  # Set dynamically
