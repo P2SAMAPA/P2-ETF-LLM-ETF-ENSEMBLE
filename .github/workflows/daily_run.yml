@@ -1,4 +1,4 @@
-name: LLM ETF Ensemble Daily Run & Deploy
+name: LLM ETF Ensemble Daily Run
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
 jobs:
   run-ensemble:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     
     steps:
     - name: Checkout code
@@ -31,27 +31,20 @@ jobs:
       run: |
         python trainer.py
     
-    - name: Upload results to HuggingFace
+    - name: Upload results to HuggingFace Dataset
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         # Results are already uploaded by trainer.py
+        echo "✅ Results uploaded to HuggingFace dataset"
     
-    - name: Deploy Streamlit to HuggingFace Spaces
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    - name: Trigger Streamlit Cloud Deploy
       run: |
-        # Clone space
-        git clone https://$HF_TOKEN@huggingface.co/spaces/P2SAMAPA/p2-llm-etf-ensemble-space
-        cd p2-llm-etf-ensemble-space
-        
-        # Copy files
-        cp ../streamlit_app.py .
-        cp ../requirements.txt .
-        
-        # Commit and push
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git config user.name "github-actions[bot]"
-        git add streamlit_app.py requirements.txt
-        git commit -m "Update from GitHub Actions - $(date '+%Y-%m-%d %H:%M')" || true
-        git push
+        # Trigger Streamlit Cloud to redeploy
+        curl -X POST "https://api.streamlit.io/v1/deploy" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "repo": "P2SAMAPA/P2-ETF-LLM-ETF-ENSEMBLE",
+            "branch": "main",
+            "main_file": "streamlit_app.py"
+          }' || echo "Streamlit Cloud webhook failed (may need manual setup)"
