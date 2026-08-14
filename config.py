@@ -32,12 +32,15 @@ UNIVERSES = {
 # LLM CONFIGURATION
 # ============================================
 
-# ---------- OpenRouter ----------
+# ---------- OpenRouter (Requires credits) ----------
 # Get your API key from: https://openrouter.ai/keys
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# ---------- HuggingFace Inference ----------
-# No API key required - completely free
+# ---------- Ollama Cloud (FREE models!) ----------
+# Get your API key from: https://ollama.com/signup
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
+# Ollama Cloud URL (default: https://api.ollama.com)
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "https://api.ollama.com")
 
 # ---------- General Settings ----------
 TOP_N = 3
@@ -58,11 +61,15 @@ def print_config():
     print("\n--- LLM Providers ---")
     
     if OPENROUTER_API_KEY:
-        print("✅ OpenRouter: Enabled")
+        print("✅ OpenRouter: Enabled (needs credits)")
     else:
         print("❌ OpenRouter: Disabled (no API key)")
     
-    print("✅ HuggingFace Inference: Enabled (free)")
+    if OLLAMA_API_KEY:
+        print(f"✅ Ollama Cloud: Enabled (FREE models!)")
+        print(f"   URL: {OLLAMA_URL}")
+    else:
+        print("❌ Ollama Cloud: Disabled (no API key)")
     print("="*50 + "\n")
 
 
