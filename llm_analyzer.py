@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Simplified: Each model makes 3 separate calls (1 pick each) with exclusions.
+Uses multiple free LLM models from OpenRouter + Ollama Cloud.
 """
 
 import os
@@ -31,14 +31,20 @@ class LLMAnalyzer:
         
         ticker_list = ', '.join(tickers)
         
-        exclude_text = ""
+        # If we have existing picks, remove them from the available list
+        available_tickers = tickers
         if existing_picks and len(existing_picks) > 0:
-            exclude_text = f"\n\nIMPORTANT: Do NOT pick these: {', '.join(existing_picks)}. Pick a DIFFERENT ETF."
+            available_tickers = [t for t in tickers if t not in existing_picks]
+            if not available_tickers:
+                # If all tickers are already picked, return None
+                return None
+        
+        ticker_list = ', '.join(available_tickers)
         
         prompt = f"""You are a financial analyst. Select the SINGLE BEST ETF from this list that will perform best tomorrow.
 
 Universe: {universe_name}
-Available ETFs: {ticker_list}{exclude_text}
+Available ETFs: {ticker_list}
 
 Return ONLY this JSON format:
 {{"ticker": "GLD", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand"}}
@@ -100,20 +106,31 @@ class OpenRouterAnalyzer(LLMAnalyzer):
         for model in self.models:
             model_picks = []
             existing = []
+            available = tickers.copy()
             
             # Make 3 calls per model
             for pick_num in range(1, self.top_n + 1):
                 try:
-                    prompt = self.build_prompt(universe_name, tickers, existing)
+                    # Build prompt with exclusion
+                    prompt = self.build_prompt(universe_name, available, existing)
+                    if prompt is None:
+                        break
+                    
                     response = self._call_api(model, prompt)
                     if response:
                         pick = self.parse_response(response)
                         if pick and pick.get("ticker"):
-                            pick["model"] = f"openrouter/{model}"
-                            pick["pick_number"] = pick_num
-                            model_picks.append(pick)
-                            existing.append(pick.get("ticker"))
-                            logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {pick.get('ticker')}")
+                            ticker = pick.get("ticker").upper()
+                            # Verify ticker is in the available list
+                            if ticker in available:
+                                pick["model"] = f"openrouter/{model}"
+                                pick["pick_number"] = pick_num
+                                model_picks.append(pick)
+                                existing.append(ticker)
+                                available.remove(ticker)
+                                logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {ticker}")
+                            else:
+                                logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: Invalid ticker {ticker}")
                         else:
                             logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: No valid pick")
                     else:
@@ -129,6 +146,9 @@ class OpenRouterAnalyzer(LLMAnalyzer):
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call OpenRouter API."""
+        if not prompt:
+            return None
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -276,19 +296,28 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
         for model in self.available_models:
             model_picks = []
             existing = []
+            available = tickers.copy()
             
             for pick_num in range(1, self.top_n + 1):
                 try:
-                    prompt = self.build_prompt(universe_name, tickers, existing)
+                    prompt = self.build_prompt(universe_name, available, existing)
+                    if prompt is None:
+                        break
+                    
                     response = self._call_api(model, prompt)
                     if response:
                         pick = self.parse_response(response)
                         if pick and pick.get("ticker"):
-                            pick["model"] = f"ollama/{model}"
-                            pick["pick_number"] = pick_num
-                            model_picks.append(pick)
-                            existing.append(pick.get("ticker"))
-                            logger.info(f"    ✅ ollama/{model} pick {pick_num}: {pick.get('ticker')}")
+                            ticker = pick.get("ticker").upper()
+                            if ticker in available:
+                                pick["model"] = f"ollama/{model}"
+                                pick["pick_number"] = pick_num
+                                model_picks.append(pick)
+                                existing.append(ticker)
+                                available.remove(ticker)
+                                logger.info(f"    ✅ ollama/{model} pick {pick_num}: {ticker}")
+                            else:
+                                logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: Invalid ticker {ticker}")
                         else:
                             logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: No valid pick")
                     else:
@@ -304,6 +333,9 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
     
     def _call_api(self, model: str, prompt: str) -> str:
         """Call Ollama Cloud API."""
+        if not prompt:
+            return None
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
