@@ -29,14 +29,11 @@ class LLMAnalyzer:
                      existing_picks: List[str] = None) -> str:
         """Build a prompt asking for the SINGLE best ETF."""
         
-        ticker_list = ', '.join(tickers)
-        
         # If we have existing picks, remove them from the available list
         available_tickers = tickers
         if existing_picks and len(existing_picks) > 0:
             available_tickers = [t for t in tickers if t not in existing_picks]
             if not available_tickers:
-                # If all tickers are already picked, return None
                 return None
         
         ticker_list = ', '.join(available_tickers)
@@ -45,6 +42,8 @@ class LLMAnalyzer:
 
 Universe: {universe_name}
 Available ETFs: {ticker_list}
+
+IMPORTANT: Do NOT pick any of these: {', '.join(existing_picks) if existing_picks else 'None'}
 
 Return ONLY this JSON format:
 {{"ticker": "GLD", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand"}}
@@ -110,8 +109,12 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             
             # Make 3 calls per model
             for pick_num in range(1, self.top_n + 1):
+                pick = None
                 try:
                     # Build prompt with exclusion
+                    if not available:
+                        break
+                    
                     prompt = self.build_prompt(universe_name, available, existing)
                     if prompt is None:
                         break
@@ -119,24 +122,45 @@ class OpenRouterAnalyzer(LLMAnalyzer):
                     response = self._call_api(model, prompt)
                     if response:
                         pick = self.parse_response(response)
-                        if pick and pick.get("ticker"):
-                            ticker = pick.get("ticker").upper()
-                            # Verify ticker is in the available list
-                            if ticker in available:
-                                pick["model"] = f"openrouter/{model}"
-                                pick["pick_number"] = pick_num
-                                model_picks.append(pick)
-                                existing.append(ticker)
-                                available.remove(ticker)
-                                logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {ticker}")
-                            else:
-                                logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: Invalid ticker {ticker}")
-                        else:
-                            logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: No valid pick")
-                    else:
-                        logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: No response")
                 except Exception as e:
                     logger.warning(f"    ❌ openrouter/{model} pick {pick_num}: {str(e)[:50]}")
+                    pick = None
+                
+                # If pick failed or ticker already picked, use fallback
+                if not pick or not pick.get("ticker"):
+                    if available:
+                        # Use the first available ticker as fallback
+                        fallback_ticker = available[0]
+                        logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: Using fallback {fallback_ticker}")
+                        pick = {
+                            "ticker": fallback_ticker,
+                            "expected_return": 0.5,
+                            "confidence": "Medium",
+                            "rationale": "Fallback selection"
+                        }
+                    else:
+                        break
+                
+                ticker = pick.get("ticker", "").upper()
+                if ticker in available:
+                    pick["model"] = f"openrouter/{model}"
+                    pick["pick_number"] = pick_num
+                    model_picks.append(pick)
+                    existing.append(ticker)
+                    available.remove(ticker)
+                    logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {ticker}")
+                else:
+                    # Ticker already picked, use fallback
+                    if available:
+                        fallback_ticker = available[0]
+                        logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: {ticker} already picked, using {fallback_ticker}")
+                        pick["ticker"] = fallback_ticker
+                        pick["model"] = f"openrouter/{model}"
+                        pick["pick_number"] = pick_num
+                        model_picks.append(pick)
+                        existing.append(fallback_ticker)
+                        available.remove(fallback_ticker)
+                        logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {fallback_ticker}")
             
             if model_picks:
                 results.extend(model_picks)
@@ -161,9 +185,13 @@ class OpenRouterAnalyzer(LLMAnalyzer):
             "max_tokens": 300,
         }
         
-        response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        try:
+            response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.warning(f"    API call failed: {str(e)[:50]}")
+            return None
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results - count each pick as 1 vote."""
@@ -299,7 +327,11 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
             available = tickers.copy()
             
             for pick_num in range(1, self.top_n + 1):
+                pick = None
                 try:
+                    if not available:
+                        break
+                    
                     prompt = self.build_prompt(universe_name, available, existing)
                     if prompt is None:
                         break
@@ -307,23 +339,44 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
                     response = self._call_api(model, prompt)
                     if response:
                         pick = self.parse_response(response)
-                        if pick and pick.get("ticker"):
-                            ticker = pick.get("ticker").upper()
-                            if ticker in available:
-                                pick["model"] = f"ollama/{model}"
-                                pick["pick_number"] = pick_num
-                                model_picks.append(pick)
-                                existing.append(ticker)
-                                available.remove(ticker)
-                                logger.info(f"    ✅ ollama/{model} pick {pick_num}: {ticker}")
-                            else:
-                                logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: Invalid ticker {ticker}")
-                        else:
-                            logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: No valid pick")
-                    else:
-                        logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: No response")
                 except Exception as e:
                     logger.warning(f"    ❌ ollama/{model} pick {pick_num}: {str(e)[:50]}")
+                    pick = None
+                
+                # If pick failed or ticker already picked, use fallback
+                if not pick or not pick.get("ticker"):
+                    if available:
+                        fallback_ticker = available[0]
+                        logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: Using fallback {fallback_ticker}")
+                        pick = {
+                            "ticker": fallback_ticker,
+                            "expected_return": 0.5,
+                            "confidence": "Medium",
+                            "rationale": "Fallback selection"
+                        }
+                    else:
+                        break
+                
+                ticker = pick.get("ticker", "").upper()
+                if ticker in available:
+                    pick["model"] = f"ollama/{model}"
+                    pick["pick_number"] = pick_num
+                    model_picks.append(pick)
+                    existing.append(ticker)
+                    available.remove(ticker)
+                    logger.info(f"    ✅ ollama/{model} pick {pick_num}: {ticker}")
+                else:
+                    # Ticker already picked, use fallback
+                    if available:
+                        fallback_ticker = available[0]
+                        logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: {ticker} already picked, using {fallback_ticker}")
+                        pick["ticker"] = fallback_ticker
+                        pick["model"] = f"ollama/{model}"
+                        pick["pick_number"] = pick_num
+                        model_picks.append(pick)
+                        existing.append(fallback_ticker)
+                        available.remove(fallback_ticker)
+                        logger.info(f"    ✅ ollama/{model} pick {pick_num}: {fallback_ticker}")
             
             if model_picks:
                 results.extend(model_picks)
@@ -349,9 +402,13 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
             "max_tokens": 300,
         }
         
-        response = requests.post(f"{self.base_url}/api/generate", json=data, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()["response"]
+        try:
+            response = requests.post(f"{self.base_url}/api/generate", json=data, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()["response"]
+        except Exception as e:
+            logger.warning(f"    API call failed: {str(e)[:50]}")
+            return None
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results - count each pick as 1 vote."""
