@@ -2,7 +2,7 @@
 llm_analyzer.py  —  LLM ETF Analysis Engine
 ============================================
 
-Uses multiple free LLM models from OpenRouter + Ollama Cloud.
+Uses only working models (Ollama Cloud) with 3 calls per model.
 """
 
 import os
@@ -29,7 +29,6 @@ class LLMAnalyzer:
                      existing_picks: List[str] = None) -> str:
         """Build a prompt asking for the SINGLE best ETF."""
         
-        # If we have existing picks, remove them from the available list
         available_tickers = tickers
         if existing_picks and len(existing_picks) > 0:
             available_tickers = [t for t in tickers if t not in existing_picks]
@@ -42,8 +41,6 @@ class LLMAnalyzer:
 
 Universe: {universe_name}
 Available ETFs: {ticker_list}
-
-IMPORTANT: Do NOT pick any of these: {', '.join(existing_picks) if existing_picks else 'None'}
 
 Return ONLY this JSON format:
 {{"ticker": "GLD", "expected_return": 1.5, "confidence": "High", "rationale": "Safe-haven demand"}}
@@ -63,207 +60,11 @@ Return ONLY the JSON, no other text."""
         except:
             pass
         
-        # Fallback: extract ticker
-        tickers_found = re.findall(r'([A-Z]{1,5})', response_text)
-        for ticker in tickers_found:
-            if len(ticker) >= 2:
-                return {
-                    "ticker": ticker,
-                    "expected_return": 0.5,
-                    "confidence": "Medium",
-                    "rationale": "Extracted from response"
-                }
-        
         return None
 
 
 # ============================================
-# OPENROUTER ANALYZER
-# ============================================
-
-class OpenRouterAnalyzer(LLMAnalyzer):
-    """OpenRouter API - 3 separate calls per model."""
-    
-    def __init__(self, config: Dict, api_key: str):
-        super().__init__(config)
-        self.api_key = api_key
-        self.models = [
-            "meta-llama/llama-3.2-3b-instruct",
-            "microsoft/phi-3.5-mini-128k-instruct",
-            "mistralai/mistral-7b-instruct",
-            "qwen/qwen-2.5-7b-instruct",
-        ]
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-    
-    def analyze(self, universe_name: str, tickers: List[str]) -> Dict:
-        """Analyze - make 3 separate calls per model."""
-        results = []
-        successful_models = []
-        
-        logger.info(f"  Querying {len(self.models)} OpenRouter models (3 calls each)...")
-        
-        for model in self.models:
-            model_picks = []
-            existing = []
-            available = tickers.copy()
-            
-            # Make 3 calls per model
-            for pick_num in range(1, self.top_n + 1):
-                pick = None
-                try:
-                    # Build prompt with exclusion
-                    if not available:
-                        break
-                    
-                    prompt = self.build_prompt(universe_name, available, existing)
-                    if prompt is None:
-                        break
-                    
-                    response = self._call_api(model, prompt)
-                    if response:
-                        pick = self.parse_response(response)
-                except Exception as e:
-                    logger.warning(f"    ❌ openrouter/{model} pick {pick_num}: {str(e)[:50]}")
-                    pick = None
-                
-                # If pick failed or ticker already picked, use fallback
-                if not pick or not pick.get("ticker"):
-                    if available:
-                        # Use the first available ticker as fallback
-                        fallback_ticker = available[0]
-                        logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: Using fallback {fallback_ticker}")
-                        pick = {
-                            "ticker": fallback_ticker,
-                            "expected_return": 0.5,
-                            "confidence": "Medium",
-                            "rationale": "Fallback selection"
-                        }
-                    else:
-                        break
-                
-                ticker = pick.get("ticker", "").upper()
-                if ticker in available:
-                    pick["model"] = f"openrouter/{model}"
-                    pick["pick_number"] = pick_num
-                    model_picks.append(pick)
-                    existing.append(ticker)
-                    available.remove(ticker)
-                    logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {ticker}")
-                else:
-                    # Ticker already picked, use fallback
-                    if available:
-                        fallback_ticker = available[0]
-                        logger.warning(f"    ⚠️ openrouter/{model} pick {pick_num}: {ticker} already picked, using {fallback_ticker}")
-                        pick["ticker"] = fallback_ticker
-                        pick["model"] = f"openrouter/{model}"
-                        pick["pick_number"] = pick_num
-                        model_picks.append(pick)
-                        existing.append(fallback_ticker)
-                        available.remove(fallback_ticker)
-                        logger.info(f"    ✅ openrouter/{model} pick {pick_num}: {fallback_ticker}")
-            
-            if model_picks:
-                results.extend(model_picks)
-                successful_models.append(f"openrouter/{model}")
-        
-        return self._aggregate_results(results, successful_models)
-    
-    def _call_api(self, model: str, prompt: str) -> str:
-        """Call OpenRouter API."""
-        if not prompt:
-            return None
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        
-        data = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 300,
-        }
-        
-        try:
-            response = requests.post(self.base_url, json=data, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.warning(f"    API call failed: {str(e)[:50]}")
-            return None
-    
-    def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
-        """Aggregate results - count each pick as 1 vote."""
-        if not results:
-            return {"selections": [], "consensus": {}}
-        
-        ticker_votes = {}
-        ticker_data = {}
-        
-        for r in results:
-            ticker = r.get("ticker", "").upper()
-            model = r.get("model", "unknown")
-            
-            if not ticker:
-                continue
-            
-            if ticker not in ticker_votes:
-                ticker_votes[ticker] = 0
-                ticker_data[ticker] = {
-                    "returns": [],
-                    "confidences": [],
-                    "rationales": [],
-                    "models": []
-                }
-            
-            ticker_votes[ticker] += 1
-            ticker_data[ticker]["returns"].append(r.get("expected_return", 0.5))
-            ticker_data[ticker]["confidences"].append(r.get("confidence", "Medium"))
-            ticker_data[ticker]["rationales"].append(r.get("rationale", ""))
-            
-            if model and model != 'unknown' and model not in ticker_data[ticker]["models"]:
-                ticker_data[ticker]["models"].append(model)
-        
-        sorted_tickers = sorted(
-            ticker_votes.items(),
-            key=lambda x: (x[1], sum(ticker_data[x[0]]["returns"]) / len(ticker_data[x[0]]["returns"])),
-            reverse=True
-        )
-        
-        top_tickers = [t for t, _ in sorted_tickers[:self.top_n]]
-        
-        selections = []
-        for ticker in top_tickers:
-            data = ticker_data[ticker]
-            avg_return = sum(data["returns"]) / len(data["returns"])
-            
-            conf_counts = {}
-            for c in data["confidences"]:
-                conf_counts[c] = conf_counts.get(c, 0) + 1
-            top_conf = max(conf_counts, key=conf_counts.get)
-            
-            selections.append({
-                "ticker": ticker,
-                "expected_return": round(avg_return, 2),
-                "confidence": top_conf,
-                "rationale": data["rationales"][0] if data["rationales"] else "",
-                "votes": ticker_votes[ticker],
-                "models": data["models"]
-            })
-        
-        return {
-            "selections": selections,
-            "consensus": {
-                "total_votes": len(results),
-                "ticker_votes": ticker_votes,
-                "models_used": list(set(successful_models))
-            }
-        }
-
-
-# ============================================
-# OLLAMA CLOUD ANALYZER
+# OLLAMA CLOUD ANALYZER (Only working models)
 # ============================================
 
 class OllamaCloudAnalyzer(LLMAnalyzer):
@@ -275,10 +76,10 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
         self.api_key = os.environ.get("OLLAMA_API_KEY") or config.get("OLLAMA_API_KEY")
         self.base_url = "https://api.ollama.com"
         
+        # Only models that are confirmed working
         self.models = [
             "nemotron-3-nano:30b",
             "gemma4:31b",
-            "deepseek-v4-flash:preview",
             "minimax-m3",
         ]
         self.available_models = []
@@ -304,8 +105,10 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
                 
                 if self.available_models:
                     logger.info(f"✅ Ollama Cloud: {len(self.available_models)} models available")
+                    logger.info(f"   Models: {self.available_models}")
                 else:
                     logger.warning("⚠️ No matching models found")
+                    logger.info(f"   Available: {available[:5]}")
             else:
                 logger.warning(f"⚠️ API returned {response.status_code}")
         except Exception as e:
@@ -327,7 +130,6 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
             available = tickers.copy()
             
             for pick_num in range(1, self.top_n + 1):
-                pick = None
                 try:
                     if not available:
                         break
@@ -339,48 +141,29 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
                     response = self._call_api(model, prompt)
                     if response:
                         pick = self.parse_response(response)
+                        if pick and pick.get("ticker"):
+                            ticker = pick.get("ticker", "").upper()
+                            if ticker in available:
+                                pick["model"] = f"ollama/{model}"
+                                pick["pick_number"] = pick_num
+                                model_picks.append(pick)
+                                existing.append(ticker)
+                                available.remove(ticker)
+                                logger.info(f"    ✅ ollama/{model} pick {pick_num}: {ticker} ({pick.get('expected_return', 0)}%)")
+                                continue
+                    
+                    # If we get here, the pick failed or ticker was invalid
+                    logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: Failed, retrying...")
+                    
                 except Exception as e:
                     logger.warning(f"    ❌ ollama/{model} pick {pick_num}: {str(e)[:50]}")
-                    pick = None
-                
-                # If pick failed or ticker already picked, use fallback
-                if not pick or not pick.get("ticker"):
-                    if available:
-                        fallback_ticker = available[0]
-                        logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: Using fallback {fallback_ticker}")
-                        pick = {
-                            "ticker": fallback_ticker,
-                            "expected_return": 0.5,
-                            "confidence": "Medium",
-                            "rationale": "Fallback selection"
-                        }
-                    else:
-                        break
-                
-                ticker = pick.get("ticker", "").upper()
-                if ticker in available:
-                    pick["model"] = f"ollama/{model}"
-                    pick["pick_number"] = pick_num
-                    model_picks.append(pick)
-                    existing.append(ticker)
-                    available.remove(ticker)
-                    logger.info(f"    ✅ ollama/{model} pick {pick_num}: {ticker}")
-                else:
-                    # Ticker already picked, use fallback
-                    if available:
-                        fallback_ticker = available[0]
-                        logger.warning(f"    ⚠️ ollama/{model} pick {pick_num}: {ticker} already picked, using {fallback_ticker}")
-                        pick["ticker"] = fallback_ticker
-                        pick["model"] = f"ollama/{model}"
-                        pick["pick_number"] = pick_num
-                        model_picks.append(pick)
-                        existing.append(fallback_ticker)
-                        available.remove(fallback_ticker)
-                        logger.info(f"    ✅ ollama/{model} pick {pick_num}: {fallback_ticker}")
             
             if model_picks:
                 results.extend(model_picks)
                 successful_models.append(f"ollama/{model}")
+                logger.info(f"    ✅ ollama/{model}: {len(model_picks)} picks")
+            else:
+                logger.warning(f"    ⚠️ ollama/{model}: 0 picks")
         
         return self._aggregate_results(results, successful_models)
     
@@ -402,13 +185,9 @@ class OllamaCloudAnalyzer(LLMAnalyzer):
             "max_tokens": 300,
         }
         
-        try:
-            response = requests.post(f"{self.base_url}/api/generate", json=data, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json()["response"]
-        except Exception as e:
-            logger.warning(f"    API call failed: {str(e)[:50]}")
-            return None
+        response = requests.post(f"{self.base_url}/api/generate", json=data, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()["response"]
     
     def _aggregate_results(self, results: List[Dict], successful_models: List[str]) -> Dict:
         """Aggregate results - count each pick as 1 vote."""
@@ -490,22 +269,17 @@ class EnsembleAnalyzer:
         self.config = config
         self.analyzers = []
         
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        if openrouter_key:
-            self.analyzers.append(OpenRouterAnalyzer(config, openrouter_key))
-            logger.info("✅ OpenRouter analyzer initialized")
-        else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set")
-        
+        # Only use Ollama Cloud (working models)
         ollama = OllamaCloudAnalyzer(config)
         if ollama.available_models:
             self.analyzers.append(ollama)
             logger.info("✅ Ollama Cloud analyzer initialized")
         else:
-            logger.warning("⚠️ Ollama Cloud not available")
+            logger.error("❌ Ollama Cloud not available")
         
         if not self.analyzers:
             logger.error("❌ No LLM analyzers available")
+            logger.info("   Please set OLLAMA_API_KEY in your environment")
     
     def analyze_universe(self, universe_name: str, tickers: List[str]) -> Dict:
         """Run all analyzers on a universe."""
@@ -519,7 +293,7 @@ class EnsembleAnalyzer:
             
             for future in as_completed(futures):
                 try:
-                    result = future.result(timeout=300)
+                    result = future.result(timeout=180)
                     if result.get("selections"):
                         all_results.append(result)
                 except Exception as e:
