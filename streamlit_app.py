@@ -192,31 +192,32 @@ def get_confidence_color(confidence):
 
 
 def create_probability_chart(selections):
-    """Bar chart of each pick's trailing 1-month return (real market data,
-    not a forecast — labelled as such in the chart title)."""
+    """Bar chart of each pick's consensus predicted next-1-month return
+    (average of each model's own forward-looking estimate)."""
     if not selections:
         return None
 
     df = pd.DataFrame(selections)
-    df['expected_return'] = pd.to_numeric(df.get('expected_return'), errors='coerce').fillna(0)
-    df = df.sort_values('expected_return', ascending=True)
+    return_col = 'predicted_return_1m' if 'predicted_return_1m' in df.columns else 'expected_return'
+    df[return_col] = pd.to_numeric(df.get(return_col), errors='coerce').fillna(0)
+    df = df.sort_values(return_col, ascending=True)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df['expected_return'],
+        x=df[return_col],
         y=df['ticker'],
         orientation='h',
-        text=df['expected_return'].apply(lambda x: f"{x:.1f}%"),
+        text=df[return_col].apply(lambda x: f"{x:.1f}%"),
         textposition='outside',
         marker_color=['#27ae60' if r > 1.0 else '#f39c12' if r > 0.5 else '#e74c3c'
-                      for r in df['expected_return']],
-        hovertemplate='<b>%{y}</b><br>Trailing 1M Return: %{x:.1f}%<br>Confidence: %{customdata}<extra></extra>',
+                      for r in df[return_col]],
+        hovertemplate='<b>%{y}</b><br>Predicted 1M Return: %{x:.1f}%<br>Confidence: %{customdata}<extra></extra>',
         customdata=df['confidence']
     ))
 
     fig.update_layout(
-        title="Trailing 1-Month Return by ETF (market data, not a forecast)",
-        xaxis_title="1M Return (%)",
+        title="Predicted Next-1-Month Return by ETF (AI consensus estimate, not guaranteed)",
+        xaxis_title="Predicted 1M Return (%)",
         yaxis_title="",
         height=300,
         margin=dict(l=0, r=0, t=40, b=0),
@@ -311,8 +312,17 @@ def display_universe(universe_data, universe_name):
             else:
                 model_html = '<span class="llm-tag llm-tag-other">No model data</span>'
             
-            expected_return = pick.get('expected_return')
-            return_display = f"{expected_return:.1f}%" if isinstance(expected_return, (int, float)) else "n/a"
+            predicted_return = pick.get('predicted_return_1m', pick.get('expected_return'))
+            return_display = f"{predicted_return:.1f}%" if isinstance(predicted_return, (int, float)) else "n/a"
+
+            pred_range = pick.get('predicted_return_1m_range')
+            range_display = f" (range {pred_range[0]:.1f}% to {pred_range[1]:.1f}%)" if pred_range else ""
+
+            trailing = pick.get('trailing_return_1m')
+            trailing_display = f"{trailing:.1f}%" if isinstance(trailing, (int, float)) else "n/a"
+            vol = pick.get('annualized_volatility_pct')
+            vol_display = f"{vol:.1f}%" if isinstance(vol, (int, float)) else "n/a"
+
             points = pick.get('points')
             points_display = f" · {points} pts" if points is not None else ""
 
@@ -323,13 +333,16 @@ def display_universe(universe_data, universe_name):
                     {return_display}
                 </div>
                 <div style="font-size:0.75rem; color:#888; margin-top:-0.4rem;">
-                    trailing 1M return (market data, not a forecast)
+                    predicted next-1-month return (AI consensus estimate, not guaranteed){range_display}
                 </div>
                 <div class="{confidence_class}" style="font-size:1.1rem; margin-top:0.5rem;">
                     Confidence: {pick.get('confidence', 'Medium')}
                 </div>
                 <div style="font-size:0.9rem; color:#666; margin-top:0.3rem;">
                     🗳️ {pick.get('votes', 0)} model(s) selected this ETF{points_display}
+                </div>
+                <div style="font-size:0.75rem; color:#888; margin-top:0.2rem;">
+                    trailing 1M: {trailing_display} · ann. volatility: {vol_display}
                 </div>
                 <div style="margin-top:0.3rem; font-size:0.7rem; color:#888;">
                     Models that voted:
@@ -456,8 +469,8 @@ python trainer.py
     top_cross = data.get('ensemble_summary', {}).get('top_cross_universe_picks', [])
     if top_cross:
         df_cross = pd.DataFrame(top_cross)
-        if 'expected_return' in df_cross.columns:
-            df_cross['expected_return'] = df_cross['expected_return'].apply(
+        if 'predicted_return_1m' in df_cross.columns:
+            df_cross['predicted_return_1m'] = df_cross['predicted_return_1m'].apply(
                 lambda x: f"{x:.1f}%" if isinstance(x, (int, float)) else "n/a"
             )
         st.dataframe(
@@ -467,7 +480,7 @@ python trainer.py
             column_config={
                 'ticker': 'Ticker',
                 'universe': 'Universe',
-                'expected_return': 'Expected Return',
+                'predicted_return_1m': 'Predicted 1M Return',
                 'confidence': 'Confidence',
                 'votes': 'Votes'
             }

@@ -36,19 +36,32 @@ def build_prompt(universe_name: str, tickers: List[str], market_table: str, pick
 
 Available ETFs (you may ONLY pick from this exact list): {ticker_list}
 
-Recent price data (trailing returns, not a prediction — use it as context):
+Recent trailing price data (context only, NOT what you're predicting):
 {market_table}
 
 Rank your top {picks_per_model} ETF picks from the list above, best first.
-Base your ranking on the price data shown plus your general knowledge of
-what each ETF/sector represents. Do not pick anything outside the list.
+For EACH pick, also give your own estimate of that ETF's total return over
+the NEXT 21 trading days (~1 month), as a percentage. This is a forward-
+looking estimate you are making, not the trailing number shown above — it
+should reflect your judgment given momentum, volatility, sector context and
+macro conditions. Do not pick anything outside the list.
 
 Respond with ONLY this JSON structure and nothing else:
 {{"picks": [
-  {{"rank": 1, "ticker": "TICK", "confidence": "High", "rationale": "one short sentence"}},
-  {{"rank": 2, "ticker": "TICK", "confidence": "Medium", "rationale": "one short sentence"}},
-  {{"rank": 3, "ticker": "TICK", "confidence": "Medium", "rationale": "one short sentence"}}
+  {{"rank": 1, "ticker": "TICK", "predicted_return_1m_pct": 1.8, "confidence": "High", "rationale": "one short sentence"}},
+  {{"rank": 2, "ticker": "TICK", "predicted_return_1m_pct": 1.2, "confidence": "Medium", "rationale": "one short sentence"}},
+  {{"rank": 3, "ticker": "TICK", "predicted_return_1m_pct": 0.5, "confidence": "Medium", "rationale": "one short sentence"}}
 ]}}"""
+
+
+def _coerce_predicted_return(value) -> Optional[float]:
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return None
+    # Sanity clamp — a single-model hallucinated "500%" shouldn't be able to
+    # blow up the averaged consensus number.
+    return max(-50.0, min(50.0, pct))
 
 
 def parse_response(text: str, valid_tickers: List[str], picks_per_model: int) -> Optional[List[Dict]]:
@@ -75,6 +88,7 @@ def parse_response(text: str, valid_tickers: List[str], picks_per_model: int) ->
         picks.append({
             "rank": rank,
             "ticker": ticker,
+            "predicted_return_1m_pct": _coerce_predicted_return(p.get("predicted_return_1m_pct")),
             "confidence": str(p.get("confidence", "Medium")).title(),
             "rationale": str(p.get("rationale", ""))[:300],
         })
@@ -228,6 +242,7 @@ class EnsembleAnalyzer:
         confidences: Dict[str, List[str]] = {}
         rationales: Dict[str, List[str]] = {}
         models_by_ticker: Dict[str, List[str]] = {}
+        predicted_returns: Dict[str, List[float]] = {}
 
         rank_points = self.cfg.RANK_POINTS
         conf_weight = self.cfg.CONFIDENCE_WEIGHT
@@ -245,6 +260,8 @@ class EnsembleAnalyzer:
                 confidences.setdefault(ticker, []).append(pick["confidence"])
                 rationales.setdefault(ticker, []).append(pick["rationale"])
                 models_by_ticker.setdefault(ticker, []).append(model)
+                if pick.get("predicted_return_1m_pct") is not None:
+                    predicted_returns.setdefault(ticker, []).append(pick["predicted_return_1m_pct"])
 
         qualified = {t: p for t, p in points.items() if votes.get(t, 0) >= self.cfg.MIN_VOTES}
         pool_for_ranking = qualified if qualified else points
@@ -263,6 +280,9 @@ class EnsembleAnalyzer:
             top_confidence = max(conf_counts, key=conf_counts.get)
 
             md = market_snapshot.get(ticker, {})
+            preds = predicted_returns.get(ticker, [])
+            avg_predicted_return = round(sum(preds) / len(preds), 2) if preds else None
+
             selections.append({
                 "ticker": ticker,
                 "points": round(pts, 2),
@@ -270,11 +290,17 @@ class EnsembleAnalyzer:
                 "confidence": top_confidence,
                 "rationale": rationales[ticker][0] if rationales[ticker] else "",
                 "models": sorted(set(models_by_ticker[ticker])),
-                # Real trailing return, not a forecast — kept as
-                # "expected_return" for dashboard compatibility.
-                "expected_return": md.get("return_1m"),
-                "return_3m": md.get("return_3m"),
+                # Consensus average of each model's own next-21-trading-day
+                # return estimate — this is the number the dashboard
+                # highlights. It's an AI-generated forecast, not a
+                # guarantee; trailing data below is context, not a promise.
+                "predicted_return_1m": avg_predicted_return,
+                "predicted_return_1m_range": [round(min(preds), 2), round(max(preds), 2)] if preds else None,
+                "trailing_return_1m": md.get("return_1m"),
+                "trailing_return_3m": md.get("return_3m"),
                 "annualized_volatility_pct": md.get("annualized_volatility_pct"),
+                # Kept for backward compatibility with older dashboards.
+                "expected_return": avg_predicted_return,
             })
 
         return {

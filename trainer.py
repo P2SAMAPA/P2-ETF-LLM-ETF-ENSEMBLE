@@ -34,7 +34,7 @@ def build_cross_universe_summary(universes: Dict) -> Dict:
         top_picks.append({
             "universe": universe_name,
             "ticker": best["ticker"],
-            "expected_return": best.get("expected_return"),
+            "predicted_return_1m": best.get("predicted_return_1m"),
             "confidence": best.get("confidence"),
             "votes": best.get("votes"),
         })
