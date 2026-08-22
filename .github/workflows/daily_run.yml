@@ -5,47 +5,41 @@ on:
     - cron: '30 0 * * 1-6'  # 00:30 UTC, Monday-Saturday
   workflow_dispatch:  # Manual trigger
 
+concurrency:
+  group: llm-etf-ensemble-daily
+  cancel-in-progress: false
+
 jobs:
   run-ensemble:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
+    timeout-minutes: 40
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
-    
+
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
-    
-    - name: Debug - Check if secrets are available
-      run: |
-        echo "HF_TOKEN exists: ${{ secrets.HF_TOKEN != '' }}"
-        echo "OLLAMA_API_KEY exists: ${{ secrets.OLLAMA_API_KEY != '' }}"
-        echo "OPENROUTER_API_KEY exists: ${{ secrets.OPENROUTER_API_KEY != '' }}"
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-    
+      run: pip install -r requirements.txt
+
     - name: Run LLM ETF Ensemble
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
         OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      run: |
-        python trainer.py
-    
+      run: python trainer.py
+
     - name: Upload results artifact
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: llm-ensemble-results
+        name: llm-ensemble-results-${{ github.run_id }}
         path: llm_etf_ensemble_*.json
         retention-days: 30
+        if-no-files-found: warn
